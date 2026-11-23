@@ -107,8 +107,12 @@ jobs:
           # Distribution certificate -> .p12 with an empty password (what ImportCertificates.py expects).
           printf '%s\n' "$DIST_KEY_PEM" > "$RUNNER_TEMP/dist_key.pem"
           echo "$DIST_CERT_B64" | base64 --decode > "$RUNNER_TEMP/distribution.cer"
+          openssl version
           openssl x509 -inform der -in "$RUNNER_TEMP/distribution.cer" -out "$RUNNER_TEMP/distribution.pem"
+          # `security import` only reads the classic PKCS#12 algorithms (3DES + SHA1 MAC); OpenSSL 3/4
+          # defaults to AES/PBKDF2, which macOS rejects without an error.
           openssl pkcs12 -export -inkey "$RUNNER_TEMP/dist_key.pem" -in "$RUNNER_TEMP/distribution.pem" \
+            -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
             -out "$SIGN_DIR/certs/distribution.p12" -passout pass:
           rm -f "$RUNNER_TEMP/dist_key.pem"
 
@@ -117,7 +121,21 @@ jobs:
           python3 tools/testflight/asc.py ensure-ids --bundle-id "$BUNDLE_ID"
           python3 tools/testflight/asc.py profiles --bundle-id "$BUNDLE_ID" --cert "$RUNNER_TEMP/distribution.cer" --out "$SIGN_DIR/profiles"
 
-          python3 build-system/Make/ImportCertificates.py --path "$SIGN_DIR/certs"
+          # Signing keychain. The key and the certificate are imported as separate PEM/DER files
+          # (no .p12 round trip, whose encryption `security import` is picky about).
+          KC=temp.keychain
+          security delete-keychain "$KC" 2>/dev/null || true
+          security create-keychain -p secret "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          security set-keychain-settings "$KC"
+          security unlock-keychain -p secret "$KC"
+          printf '%s\n' "$DIST_KEY_PEM" > "$RUNNER_TEMP/dist_key.pem"
+          security import "$RUNNER_TEMP/dist_key.pem" -k "$KC" -t priv -f openssl -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/dist_key.pem"
+          security import "$RUNNER_TEMP/distribution.cer" -k "$KC" -T /usr/bin/codesign -T /usr/bin/security
+          security import build-system/AppleWWDRCAG3.cer -k "$KC" -T /usr/bin/codesign || true
+          security set-key-partition-list -S apple-tool:,apple: -k secret "$KC" > /dev/null
+          security find-identity -v -p codesigning "$KC"
           echo "SIGN_DIR=$SIGN_DIR" >> "$GITHUB_ENV"
 
       - name: Restore Bazel cache
