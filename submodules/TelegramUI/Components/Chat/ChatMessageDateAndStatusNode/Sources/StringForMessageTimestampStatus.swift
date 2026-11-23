@@ -258,5 +258,10 @@ public func stringForMessageTimestampStatus(
         }
     }
     
+    // MyGram: a message the sender deleted, kept because "show deleted messages" was on.
+    if message.isMyGramDeleted {
+        dateText = "🗑 видалено · \(dateText)"
+    }
+    
     return dateText
 }

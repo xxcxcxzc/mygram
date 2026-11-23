@@ -274,6 +274,15 @@ extension ReplayContext {
     }
     
     func applyDeleteMessagesWithGlobalIds(_ ids: [Int32]) {
+        var ids = ids
+        if MyGramSettings.showDeletedMessages {
+            // MyGram: keep messages deleted by others, marked as deleted.
+            let kept = myGramMarkMessagesDeleted(transaction: transaction, ids: transaction.messageIdsForGlobalIds(ids))
+            if !kept.isEmpty {
+                let keptGlobalIds = Set(kept.map { $0.id })
+                ids = ids.filter { !keptGlobalIds.contains($0) }
+            }
+        }
         var resourceIds: [MediaResourceId] = []
         transaction.deleteMessagesWithGlobalIds(ids, forEachMedia: { media in
             addMessageMediaResourceIdsToRemove(media: media, resourceIds: &resourceIds)
@@ -285,6 +294,14 @@ extension ReplayContext {
     }
     
     func applyDeleteMessages(_ ids: [MessageId]) {
+        var ids = ids
+        if MyGramSettings.showDeletedMessages {
+            // MyGram: keep messages deleted by others, marked as deleted.
+            let kept = myGramMarkMessagesDeleted(transaction: transaction, ids: ids)
+            if !kept.isEmpty {
+                ids = ids.filter { !kept.contains($0) }
+            }
+        }
         _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, manualAddMessageThreadStatsDifference: { id, add, remove in
             self.addMessageThreadStatsDifference(threadKey: id, remove: remove, addedMessagePeer: nil, addedMessageId: nil, isOutgoing: false)
         })

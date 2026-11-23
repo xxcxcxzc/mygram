@@ -44,6 +44,7 @@ typedef struct {
     float drive;
     double highpassHz;
     double lowpassHz;
+    double clarityDb;
     float outputGain;
 } VCEffectParams;
 
@@ -67,6 +68,7 @@ struct VCProcessor {
     VCBiquad highpass;
     VCBiquad lowpass;
     VCBiquad feedbackLowpass;
+    VCBiquad clarity;
 };
 
 static void vcBiquadReset(VCBiquad *b) {
@@ -105,6 +107,33 @@ static void vcBiquadSet(VCBiquad *b, double sampleRate, double frequency, double
     b->a2 = (float)((1.0 - alpha) / a0);
 }
 
+// High-shelf (RBJ): lifts (or cuts) everything above `frequency` by `gainDb`. Used to put back
+// the consonant energy that pitch shifting smears, which is what makes words hard to make out.
+static void vcHighShelfSet(VCBiquad *b, double sampleRate, double frequency, double gainDb) {
+    vcBiquadReset(b);
+    if (gainDb == 0.0 || frequency <= 0.0 || frequency >= sampleRate * 0.45) {
+        return;
+    }
+    double A = pow(10.0, gainDb / 40.0);
+    double w0 = VC_TWO_PI * frequency / sampleRate;
+    double cosw = cos(w0);
+    double sinw = sin(w0);
+    double S = 0.9; // shelf slope
+    double alpha = sinw / 2.0 * sqrt((A + 1.0 / A) * (1.0 / S - 1.0) + 2.0);
+    double twoSqrtAalpha = 2.0 * sqrt(A) * alpha;
+    double a0 = (A + 1.0) - (A - 1.0) * cosw + twoSqrtAalpha;
+    double b0 = A * ((A + 1.0) + (A - 1.0) * cosw + twoSqrtAalpha);
+    double b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw);
+    double b2 = A * ((A + 1.0) + (A - 1.0) * cosw - twoSqrtAalpha);
+    double a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cosw);
+    double a2 = (A + 1.0) - (A - 1.0) * cosw - twoSqrtAalpha;
+    b->b0 = (float)(b0 / a0);
+    b->b1 = (float)(b1 / a0);
+    b->b2 = (float)(b2 / a0);
+    b->a1 = (float)(a1 / a0);
+    b->a2 = (float)(a2 / a0);
+}
+
 static inline float vcBiquadRun(VCBiquad *b, float x) {
     float y = b->b0 * x + b->z1;
     b->z1 = b->b1 * x - b->a1 * y + b->z2;
@@ -119,64 +148,72 @@ static VCEffectParams vcParamsForEffect(int32_t effect) {
     p.outputGain = 1.0f;
     switch (effect) {
         case VCEffectChipmunk:
-            p.ratio = 1.75;
-            p.highpassHz = 120.0;
+            p.ratio = 1.55;
+            p.highpassHz = 110.0;
+            p.clarityDb = 2.0;
             break;
         case VCEffectDeep:
-            p.ratio = 0.72;
-            p.lowpassHz = 4000.0;
-            p.outputGain = 1.15f;
+            p.ratio = 0.78;
+            p.lowpassHz = 6500.0;
+            p.clarityDb = 4.0;
+            p.outputGain = 1.12f;
             break;
         case VCEffectRobot:
-            p.ringFrequency = 55.0;
-            p.ringMix = 0.85f;
-            p.delaySeconds = 1.0 / 140.0;
-            p.delayFeedback = 0.6f;
-            p.delayMix = 1.0f;
-            p.outputGain = 0.6f;
+            p.ringFrequency = 75.0;
+            p.ringMix = 0.7f;
+            p.delaySeconds = 1.0 / 160.0;
+            p.delayFeedback = 0.45f;
+            p.delayMix = 0.7f;
+            p.clarityDb = 2.0;
+            p.outputGain = 0.75f;
             break;
         case VCEffectFemale:
-            p.ratio = 1.3;
-            p.highpassHz = 160.0;
+            p.ratio = 1.24;
+            p.highpassHz = 150.0;
+            p.clarityDb = 2.5;
             break;
         case VCEffectMale:
-            p.ratio = 0.82;
-            p.outputGain = 1.1f;
+            p.ratio = 0.85;
+            p.clarityDb = 3.5;
+            p.outputGain = 1.08f;
             break;
         case VCEffectAlien:
             p.ratio = 1.15;
-            p.vibratoDepth = 0.12;
-            p.vibratoRate = 5.5;
-            p.ringFrequency = 320.0;
-            p.ringMix = 0.35f;
+            p.vibratoDepth = 0.08;
+            p.vibratoRate = 5.0;
+            p.ringFrequency = 220.0;
+            p.ringMix = 0.25f;
+            p.clarityDb = 1.5;
             break;
         case VCEffectEcho:
-            p.delaySeconds = 0.28;
-            p.delayFeedback = 0.42f;
-            p.delayMix = 0.55f;
-            p.outputGain = 0.85f;
+            p.delaySeconds = 0.26;
+            p.delayFeedback = 0.4f;
+            p.delayMix = 0.5f;
+            p.outputGain = 0.88f;
             break;
         case VCEffectRadio:
-            p.highpassHz = 500.0;
-            p.lowpassHz = 2800.0;
-            p.drive = 3.0f;
-            p.outputGain = 0.9f;
+            p.highpassHz = 450.0;
+            p.lowpassHz = 3200.0;
+            p.drive = 2.4f;
+            p.outputGain = 0.92f;
             break;
         case VCEffectMonster:
-            p.ratio = 0.55;
-            p.drive = 2.0f;
-            p.lowpassHz = 2600.0;
-            p.outputGain = 1.1f;
+            p.ratio = 0.62;
+            p.drive = 1.6f;
+            p.lowpassHz = 3200.0;
+            p.clarityDb = 4.5;
+            p.outputGain = 1.08f;
             break;
         case VCEffectChild:
-            p.ratio = 1.45;
-            p.highpassHz = 220.0;
+            p.ratio = 1.4;
+            p.highpassHz = 200.0;
+            p.clarityDb = 2.0;
             break;
         case VCEffectCave:
-            p.delaySeconds = 0.11;
-            p.delayFeedback = 0.6f;
-            p.delayMix = 0.6f;
-            p.outputGain = 0.8f;
+            p.delaySeconds = 0.1;
+            p.delayFeedback = 0.55f;
+            p.delayMix = 0.55f;
+            p.outputGain = 0.82f;
             break;
         default:
             break;
@@ -215,8 +252,9 @@ static void vcConfigure(VCProcessor *p, double sampleRate, int32_t effect) {
     p->ringPhase = 0.0;
     p->vibratoPhase = 0.0;
 
-    // ~35 ms grains: short enough to keep speech intelligible, long enough to avoid a buzz.
-    p->windowSamples = sampleRate * 0.035;
+    // ~24 ms grains: shorter than the classic 35 ms so consonants and transients stay crisp
+    // (less echo-like smearing), still long enough to avoid a low buzz.
+    p->windowSamples = sampleRate * 0.024;
     double maxWindow = (double)(VC_PITCH_BUFFER_SIZE / 2 - 8);
     if (p->windowSamples > maxWindow) {
         p->windowSamples = maxWindow;
@@ -233,6 +271,7 @@ static void vcConfigure(VCProcessor *p, double sampleRate, int32_t effect) {
     vcBiquadSet(&p->highpass, sampleRate, p->params.highpassHz, 0.8, 1);
     vcBiquadSet(&p->lowpass, sampleRate, p->params.lowpassHz, 0.8, 0);
     vcBiquadSet(&p->feedbackLowpass, sampleRate, 3000.0, 0.7, 0);
+    vcHighShelfSet(&p->clarity, sampleRate, 2800.0, p->params.clarityDb);
 }
 
 static inline float vcReadPitch(const VCProcessor *p, double delay) {
@@ -306,6 +345,10 @@ static inline float vcProcessSample(VCProcessor *p, float x) {
             }
         }
         y = vcPitchShift(p, y, ratio);
+    }
+
+    if (params->clarityDb != 0.0) {
+        y = vcBiquadRun(&p->clarity, y);
     }
 
     if (params->ringMix != 0.0f) {

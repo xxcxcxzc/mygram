@@ -1,0 +1,141 @@
+import Foundation
+import Postbox
+import SwiftSignalKit
+internal import TelegramApi
+import MtProtoKit
+
+/// MyGram's own switches (the 🛡 admin panel). Stored in UserDefaults, read from any thread.
+public final class MyGramSettings {
+    public static let didChangeNotification = Notification.Name("MyGramSettingsDidChange")
+
+    private static let showDeletedKey = "mygram.showDeletedMessages"
+    private static let ghostHideOnlineKey = "mygram.ghost.hideOnline"
+    private static let ghostOfflineAfterSendKey = "mygram.ghost.offlineAfterSend"
+    private static let ghostHideTypingKey = "mygram.ghost.hideTyping"
+    private static let ghostNoReadReceiptsKey = "mygram.ghost.noReadReceipts"
+
+    private static let registerDefaults: Void = {
+        UserDefaults.standard.register(defaults: [
+            MyGramSettings.showDeletedKey: true,
+            MyGramSettings.ghostHideOnlineKey: true,
+            MyGramSettings.ghostOfflineAfterSendKey: true,
+            MyGramSettings.ghostHideTypingKey: true,
+            MyGramSettings.ghostNoReadReceiptsKey: false
+        ])
+    }()
+
+    private static func readFlag(_ key: String) -> Bool {
+        let _ = MyGramSettings.registerDefaults
+        return UserDefaults.standard.bool(forKey: key)
+    }
+
+    private static func writeFlag(_ key: String, _ value: Bool) {
+        let _ = MyGramSettings.registerDefaults
+        UserDefaults.standard.set(value, forKey: key)
+        NotificationCenter.default.post(name: MyGramSettings.didChangeNotification, object: nil)
+    }
+
+    /// Messages deleted by others stay in the chat with a "deleted" mark instead of disappearing.
+    public static var showDeletedMessages: Bool {
+        get { return readFlag(showDeletedKey) }
+        set { writeFlag(showDeletedKey, newValue) }
+    }
+
+    /// Never tell the server we are online, so nobody sees "online" or a fresh "last seen".
+    public static var ghostHideOnline: Bool {
+        get { return readFlag(ghostHideOnlineKey) }
+        set { writeFlag(ghostHideOnlineKey, newValue) }
+    }
+
+    /// Right after sending a message, tell the server we are offline again.
+    public static var ghostOfflineAfterSend: Bool {
+        get { return readFlag(ghostOfflineAfterSendKey) }
+        set { writeFlag(ghostOfflineAfterSendKey, newValue) }
+    }
+
+    /// Don't send "typing…" / "recording…".
+    public static var ghostHideTyping: Bool {
+        get { return readFlag(ghostHideTypingKey) }
+        set { writeFlag(ghostHideTypingKey, newValue) }
+    }
+
+    /// Don't send read receipts (messages stay unread for the sender).
+    public static var ghostNoReadReceipts: Bool {
+        get { return readFlag(ghostNoReadReceiptsKey) }
+        set { writeFlag(ghostNoReadReceiptsKey, newValue) }
+    }
+}
+
+/// Marks a message that the server deleted while "show deleted messages" was on.
+public final class MyGramDeletedMessageAttribute: MessageAttribute {
+    public let date: Int32
+
+    public init(date: Int32) {
+        self.date = date
+    }
+
+    required public init(decoder: PostboxDecoder) {
+        self.date = decoder.decodeInt32ForKey("d", orElse: 0)
+    }
+
+    public func encode(_ encoder: PostboxEncoder) {
+        encoder.encodeInt32(self.date, forKey: "d")
+    }
+}
+
+public extension Message {
+    var isMyGramDeleted: Bool {
+        return self.attributes.contains(where: { $0 is MyGramDeletedMessageAttribute })
+    }
+}
+
+public extension EngineMessage {
+    var isMyGramDeleted: Bool {
+        return self.attributes.contains(where: { $0 is MyGramDeletedMessageAttribute })
+    }
+}
+
+/// Only regular cloud messages are kept; scheduled, quick-reply and local ones are deleted as usual.
+func myGramShouldKeepDeletedMessage(_ id: MessageId) -> Bool {
+    return id.namespace == Namespaces.Message.Cloud
+}
+
+/// Marks the given messages as deleted instead of removing them. Returns the ids that were kept.
+func myGramMarkMessagesDeleted(transaction: Transaction, ids: [MessageId]) -> Set<MessageId> {
+    var kept = Set<MessageId>()
+    let timestamp = Int32(Date().timeIntervalSince1970)
+    for id in ids {
+        guard myGramShouldKeepDeletedMessage(id), transaction.getMessage(id) != nil else {
+            continue
+        }
+        kept.insert(id)
+        transaction.updateMessage(id, update: { currentMessage in
+            if currentMessage.attributes.contains(where: { $0 is MyGramDeletedMessageAttribute }) {
+                return .skip
+            }
+            var attributes = currentMessage.attributes
+            attributes.append(MyGramDeletedMessageAttribute(date: timestamp))
+            return .update(StoreMessage(updating: currentMessage, attributes: attributes, tags: currentMessage.tags))
+        })
+    }
+    return kept
+}
+
+/// Ghost mode: after a message is sent, report "offline" so the send doesn't show us online.
+func myGramReportOfflineAfterSend(network: Network) {
+    guard MyGramSettings.ghostHideOnline, MyGramSettings.ghostOfflineAfterSend else {
+        return
+    }
+    for seconds in [0.3, 3.0] {
+        Queue.concurrentDefaultQueue().after(seconds, {
+            let _ = (network.request(Api.functions.account.updateStatus(offline: .boolTrue))
+            |> `catch` { _ -> Signal<Api.Bool, NoError> in
+                return .single(.boolFalse)
+            }).start()
+        })
+    }
+}
+
+func myGramHideReadReceipts() -> Bool {
+    return MyGramSettings.ghostHideOnline && MyGramSettings.ghostNoReadReceipts
+}

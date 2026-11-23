@@ -8,6 +8,7 @@ swift_library(
     ]),
     deps = [
         "//submodules/VoiceChangerCore",
+        "//submodules/TelegramCore:TelegramCore",
     ],
     visibility = [
         "//visibility:public",

@@ -17,6 +17,8 @@ private final class AccountPresenceManagerImpl {
     private var onlineTimer: SignalKitTimer?
     
     private var wasOnline: Bool = false
+    private var settingsObserver: NSObjectProtocol?
+    private var ghostHideOnline: Bool = MyGramSettings.ghostHideOnline
     
     init(queue: Queue, shouldKeepOnlinePresence: Signal<Bool, NoError>, network: Network) {
         self.queue = queue
@@ -33,6 +35,21 @@ private final class AccountPresenceManagerImpl {
                 self.updatePresence(value)
             }
         })
+        
+        // MyGram: re-send the status when ghost mode is switched on or off.
+        self.settingsObserver = NotificationCenter.default.addObserver(forName: MyGramSettings.didChangeNotification, object: nil, queue: nil, using: { [weak self] _ in
+            queue.async {
+                guard let self = self else {
+                    return
+                }
+                let ghostHideOnline = MyGramSettings.ghostHideOnline
+                if self.ghostHideOnline != ghostHideOnline {
+                    self.ghostHideOnline = ghostHideOnline
+                    // Switched on: go offline now. Switched off: back to the normal status.
+                    self.updatePresence(ghostHideOnline ? false : self.wasOnline, force: true)
+                }
+            }
+        })
     }
     
     deinit {
@@ -40,9 +57,19 @@ private final class AccountPresenceManagerImpl {
         self.shouldKeepOnlinePresenceDisposable?.dispose()
         self.currentRequestDisposable.dispose()
         self.onlineTimer?.invalidate()
+        if let settingsObserver = self.settingsObserver {
+            NotificationCenter.default.removeObserver(settingsObserver)
+        }
     }
     
-    private func updatePresence(_ isOnline: Bool) {
+    private func updatePresence(_ isOnline: Bool, force: Bool = false) {
+        if MyGramSettings.ghostHideOnline && !force {
+            // MyGram ghost mode: send no status at all, neither "online" when the app opens nor
+            // "offline" when it closes (each would refresh "last seen").
+            self.onlineTimer?.invalidate()
+            self.onlineTimer = nil
+            return
+        }
         let request: Signal<Api.Bool, MTRpcError>
         if isOnline {
             let timer = SignalKitTimer(timeout: 30.0, repeat: false, completion: { [weak self] in

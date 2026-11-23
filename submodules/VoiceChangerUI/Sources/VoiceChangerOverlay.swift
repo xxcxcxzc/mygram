@@ -1,12 +1,13 @@
 import Foundation
 import UIKit
+import TelegramCore
 
-/// A window above the app that only catches touches on the voice button, or anywhere while the
-/// voice panel is open. It deliberately has no root view controller, so it never takes over the
-/// status bar or the interface orientation of the main window. Because of that it cannot present
-/// system menus or alerts (UIMenu silently does nothing here), so the panel is a plain view.
+/// A window above the app that only catches touches on the floating buttons, or anywhere while a
+/// panel is open. It deliberately has no root view controller, so it never takes over the status
+/// bar or the interface orientation of the main window. Because of that it cannot present system
+/// menus or alerts (UIMenu silently does nothing here), so the panels are plain views.
 private final class VoiceChangerPassthroughWindow: UIWindow {
-    weak var button: UIView?
+    var buttons: [UIView] = []
     weak var panelContainer: UIView?
     var layoutUpdated: (() -> Void)?
 
@@ -14,12 +15,14 @@ private final class VoiceChangerPassthroughWindow: UIWindow {
         if let panelContainer = self.panelContainer, !panelContainer.isHidden {
             return super.hitTest(point, with: event)
         }
-        guard let button = self.button, !button.isHidden, button.alpha > 0.01 else {
-            return nil
-        }
-        let local = self.convert(point, to: button)
-        if button.bounds.insetBy(dx: -6.0, dy: -6.0).contains(local) {
-            return button
+        for button in self.buttons.reversed() {
+            guard !button.isHidden, button.alpha > 0.01 else {
+                continue
+            }
+            let local = self.convert(point, to: button)
+            if button.bounds.insetBy(dx: -6.0, dy: -6.0).contains(local) {
+                return button
+            }
         }
         return nil
     }
@@ -30,18 +33,77 @@ private final class VoiceChangerPassthroughWindow: UIWindow {
     }
 }
 
-/// The floating 🎭 button. Tap: choose a voice. Drag: move it to another place on the screen.
-/// It stays on top of every screen, including chats, voice/round-video recording and calls.
+/// Palette for the panels, tuned for a modern dark glass look.
+private enum VCPalette {
+    static let accent = UIColor(red: 0.45, green: 0.32, blue: 0.96, alpha: 1.0)
+    static let green = UIColor(red: 0.20, green: 0.78, blue: 0.52, alpha: 1.0)
+    static let separator = UIColor(white: 1.0, alpha: 0.08)
+    static let primaryText = UIColor.white
+    static let secondaryText = UIColor(white: 1.0, alpha: 0.55)
+    static let disabledText = UIColor(white: 1.0, alpha: 0.3)
+}
+
+/// One row of a panel.
+private enum PanelRow {
+    case action(icon: String, iconColor: UIColor, title: String, selected: Bool, handler: () -> Void)
+    case toggle(icon: String, iconColor: UIColor, title: String, subtitle: String?, isOn: Bool, isEnabled: Bool, handler: (Bool) -> Void)
+    case sectionGap
+}
+
+private final class RowActionTarget: NSObject {
+    let action: () -> Void
+    let toggle: ((Bool) -> Void)?
+
+    init(action: @escaping () -> Void) {
+        self.action = action
+        self.toggle = nil
+    }
+
+    init(toggle: @escaping (Bool) -> Void) {
+        self.action = {}
+        self.toggle = toggle
+    }
+
+    @objc func performAction() {
+        self.action()
+    }
+
+    @objc func switchChanged(_ sender: UISwitch) {
+        self.toggle?(sender.isOn)
+    }
+}
+
+/// The floating buttons: 🎭 chooses a voice, 🛡 opens MyGram's settings. Tap opens a panel, drag
+/// moves the button. They stay on top of every screen, including chats, recording and calls.
 public final class VoiceChangerOverlay: NSObject {
     public static let shared = VoiceChangerOverlay()
 
+    private enum ButtonKind {
+        case voice
+        case admin
+
+        var positionPrefix: String {
+            switch self {
+            case .voice: return "voiceChanger.button"
+            case .admin: return "mygram.adminButton"
+            }
+        }
+
+        var defaultYFraction: CGFloat {
+            switch self {
+            case .voice: return 0.38
+            case .admin: return 0.52
+            }
+        }
+    }
+
     private static let compactKey = "voiceChanger.compactButton"
-    private static let positionXKey = "voiceChanger.buttonX"
-    private static let positionYKey = "voiceChanger.buttonY"
 
     private var window: VoiceChangerPassthroughWindow?
-    private var button: UIButton?
+    private var voiceButton: UIButton?
+    private var adminButton: UIButton?
     private var panelContainer: UIView?
+    private var panelTargets: [RowActionTarget] = []
     private var isCompact: Bool = UserDefaults.standard.bool(forKey: VoiceChangerOverlay.compactKey)
     private var panStartCenter: CGPoint = CGPoint()
 
@@ -60,35 +122,29 @@ public final class VoiceChangerOverlay: NSObject {
         window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1.0)
         window.backgroundColor = .clear
         window.isOpaque = false
+        self.window = window
 
-        let button = UIButton(type: .custom)
-        button.layer.masksToBounds = true
-        button.layer.borderWidth = 1.0
-        button.layer.borderColor = UIColor(white: 1.0, alpha: 0.35).cgColor
-        button.titleLabel?.font = UIFont.systemFont(ofSize: 26.0)
-        button.accessibilityLabel = "Зміна голосу"
-        button.addTarget(self, action: #selector(self.buttonTapped), for: .touchUpInside)
-        window.addSubview(button)
-        window.button = button
-
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(self.handlePan(_:)))
-        button.addGestureRecognizer(pan)
+        let voiceButton = self.makeFloatingButton(accessibilityLabel: "Зміна голосу", action: #selector(self.voiceButtonTapped), pan: #selector(self.handleVoicePan(_:)))
+        let adminButton = self.makeFloatingButton(accessibilityLabel: "Налаштування MyGram", action: #selector(self.adminButtonTapped), pan: #selector(self.handleAdminPan(_:)))
+        window.addSubview(voiceButton)
+        window.addSubview(adminButton)
+        window.buttons = [voiceButton, adminButton]
+        self.voiceButton = voiceButton
+        self.adminButton = adminButton
 
         window.layoutUpdated = { [weak self] in
             guard let self = self else {
                 return
             }
-            self.clampButtonIntoView(save: false)
+            self.clampButtonsIntoView()
             if let panelContainer = self.panelContainer, let window = self.window {
                 panelContainer.frame = window.bounds
             }
         }
 
-        self.window = window
-        self.button = button
-
         self.applyAppearance()
-        self.restorePosition()
+        self.restorePosition(.voice)
+        self.restorePosition(.admin)
         window.isHidden = false
 
         VoiceChanger.shared.addObserver { [weak self] _ in
@@ -96,47 +152,164 @@ public final class VoiceChangerOverlay: NSObject {
         }
     }
 
+    private func makeFloatingButton(accessibilityLabel: String, action: Selector, pan: Selector) -> UIButton {
+        let button = UIButton(type: .custom)
+        button.layer.masksToBounds = false
+        button.layer.borderWidth = 1.0
+        button.layer.borderColor = UIColor(white: 1.0, alpha: 0.28).cgColor
+        button.layer.shadowColor = UIColor.black.cgColor
+        button.layer.shadowOpacity = 0.35
+        button.layer.shadowRadius = 8.0
+        button.layer.shadowOffset = CGSize(width: 0.0, height: 3.0)
+        button.accessibilityLabel = accessibilityLabel
+        button.addTarget(self, action: action, for: .touchUpInside)
+        button.addTarget(self, action: #selector(self.buttonTouchDown(_:)), for: .touchDown)
+        button.addTarget(self, action: #selector(self.buttonTouchUp(_:)), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+        button.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: pan))
+        return button
+    }
+
+    @objc private func buttonTouchDown(_ sender: UIButton) {
+        UIView.animate(withDuration: 0.12) {
+            sender.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+        }
+    }
+
+    @objc private func buttonTouchUp(_ sender: UIButton) {
+        UIView.animate(withDuration: 0.2, delay: 0.0, usingSpringWithDamping: 0.6, initialSpringVelocity: 0.0, options: [], animations: {
+            sender.transform = .identity
+        })
+    }
+
     private var buttonSize: CGFloat {
-        return self.isCompact ? 34.0 : 52.0
+        return self.isCompact ? 36.0 : 54.0
+    }
+
+    private func button(_ kind: ButtonKind) -> UIButton? {
+        switch kind {
+        case .voice: return self.voiceButton
+        case .admin: return self.adminButton
+        }
     }
 
     private func applyAppearance() {
-        guard let button = self.button else {
-            return
-        }
-        let effect = VoiceChanger.shared.effect
-        let center = button.frame.isEmpty ? nil : button.center
         let size = self.buttonSize
-        button.bounds = CGRect(x: 0.0, y: 0.0, width: size, height: size)
-        if let center = center {
-            button.center = center
+        let effect = VoiceChanger.shared.effect
+        for kind in [ButtonKind.voice, ButtonKind.admin] {
+            guard let button = self.button(kind) else {
+                continue
+            }
+            let center = button.frame.isEmpty ? nil : button.center
+            button.bounds = CGRect(x: 0.0, y: 0.0, width: size, height: size)
+            if let center = center {
+                button.center = center
+            }
+            button.layer.cornerRadius = size / 2.0
+            button.titleLabel?.font = UIFont.systemFont(ofSize: self.isCompact ? 18.0 : 27.0)
+            let isActive: Bool
+            switch kind {
+            case .voice:
+                button.setTitle(effect.emoji, for: .normal)
+                isActive = effect != .none
+            case .admin:
+                button.setTitle("🛡", for: .normal)
+                isActive = MyGramSettings.ghostHideOnline || MyGramSettings.showDeletedMessages
+            }
+            if isActive {
+                button.backgroundColor = kind == .voice ? VCPalette.accent.withAlphaComponent(0.92) : VCPalette.green.withAlphaComponent(0.92)
+            } else {
+                button.backgroundColor = UIColor(white: 0.1, alpha: self.isCompact ? 0.5 : 0.82)
+            }
+            button.alpha = self.isCompact && !isActive ? 0.55 : 1.0
         }
-        button.layer.cornerRadius = size / 2.0
-        button.titleLabel?.font = UIFont.systemFont(ofSize: self.isCompact ? 17.0 : 26.0)
-        button.setTitle(effect.emoji, for: .normal)
-        if effect == .none {
-            button.backgroundColor = UIColor(white: 0.08, alpha: self.isCompact ? 0.45 : 0.7)
-        } else {
-            button.backgroundColor = UIColor(red: 0.45, green: 0.2, blue: 0.95, alpha: 0.9)
-        }
-        button.alpha = self.isCompact && effect == .none ? 0.6 : 1.0
-        self.clampButtonIntoView(save: false)
+        self.clampButtonsIntoView()
     }
 
-    // MARK: - Voice panel
+    // MARK: - Panels
 
-    @objc private func buttonTapped() {
+    @objc private func voiceButtonTapped() {
         if self.panelContainer != nil {
             self.hidePanel()
-        } else {
-            self.showPanel()
-        }
-    }
-
-    private func showPanel() {
-        guard let window = self.window, let button = self.button else {
             return
         }
+        self.showVoicePanel()
+    }
+
+    @objc private func adminButtonTapped() {
+        if self.panelContainer != nil {
+            self.hidePanel()
+            return
+        }
+        self.showAdminPanel()
+    }
+
+    private func showVoicePanel() {
+        let current = VoiceChanger.shared.effect
+        var rows: [PanelRow] = []
+        for effect in VoiceChangerEffect.allCases {
+            rows.append(.action(icon: effect.emoji, iconColor: effect == current ? VCPalette.accent : UIColor(white: 1.0, alpha: 0.12), title: effect.title, selected: effect == current, handler: { [weak self] in
+                VoiceChanger.shared.setEffect(effect)
+                self?.hidePanel()
+            }))
+        }
+        rows.append(.sectionGap)
+        rows.append(.action(icon: self.isCompact ? "⤢" : "⤡", iconColor: UIColor(white: 1.0, alpha: 0.12), title: self.isCompact ? "Збільшити кнопки" : "Зменшити кнопки", selected: false, handler: { [weak self] in
+            guard let self = self else {
+                return
+            }
+            self.isCompact = !self.isCompact
+            UserDefaults.standard.set(self.isCompact, forKey: VoiceChangerOverlay.compactKey)
+            self.applyAppearance()
+            self.hidePanel()
+        }))
+        self.showPanel(emoji: "🎭", title: "Зміна голосу", subtitle: "Діє в дзвінках, голосових і кружечках", rows: rows, anchor: .voice)
+    }
+
+    private func showAdminPanel() {
+        let ghost = MyGramSettings.ghostHideOnline
+        let rows: [PanelRow] = [
+            .toggle(icon: "🗑", iconColor: UIColor(red: 0.95, green: 0.45, blue: 0.4, alpha: 1.0), title: "Видалені повідомлення", subtitle: "Не зникають з чату, а позначаються «видалено»", isOn: MyGramSettings.showDeletedMessages, isEnabled: true, handler: { [weak self] value in
+                MyGramSettings.showDeletedMessages = value
+                self?.applyAppearance()
+            }),
+            .sectionGap,
+            .toggle(icon: "👻", iconColor: VCPalette.accent, title: "Режим привида", subtitle: "Ніхто не бачить, що ти в мережі, і час «був(ла)» не оновлюється", isOn: ghost, isEnabled: true, handler: { [weak self] value in
+                MyGramSettings.ghostHideOnline = value
+                self?.applyAppearance()
+                DispatchQueue.main.async {
+                    self?.reloadAdminPanel()
+                }
+            }),
+            .toggle(icon: "⌨️", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "Ховати «друкує…»", subtitle: nil, isOn: MyGramSettings.ghostHideTyping, isEnabled: ghost, handler: { value in
+                MyGramSettings.ghostHideTyping = value
+            }),
+            .toggle(icon: "🚪", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "«Не в мережі» після відправки", subtitle: "Одразу після повідомлення знову ставить «не в мережі»", isOn: MyGramSettings.ghostOfflineAfterSend, isEnabled: ghost, handler: { value in
+                MyGramSettings.ghostOfflineAfterSend = value
+            }),
+            .toggle(icon: "✓", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "Не позначати прочитаним", subtitle: "Співрозмовник не бачить, що ти прочитав(ла)", isOn: MyGramSettings.ghostNoReadReceipts, isEnabled: ghost, handler: { value in
+                MyGramSettings.ghostNoReadReceipts = value
+            })
+        ]
+        self.showPanel(emoji: "🛡", title: "MyGram", subtitle: "Додаткові можливості", rows: rows, anchor: .admin)
+    }
+
+    private func reloadAdminPanel() {
+        guard let container = self.panelContainer else {
+            return
+        }
+        container.removeFromSuperview()
+        self.panelContainer = nil
+        self.window?.panelContainer = nil
+        self.panelTargets.removeAll()
+        self.showAdminPanel()
+        self.panelContainer?.alpha = 1.0
+    }
+
+    private func showPanel(emoji: String, title: String, subtitle: String, rows: [PanelRow], anchor: ButtonKind) {
+        guard let window = self.window, let button = self.button(anchor) else {
+            return
+        }
+        self.panelTargets.removeAll()
 
         let container = UIView(frame: window.bounds)
         container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -147,103 +320,226 @@ public final class VoiceChangerOverlay: NSObject {
         // receives no real touches.
         let dim = UIView(frame: container.bounds)
         dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        dim.backgroundColor = UIColor(white: 0.0, alpha: 0.3)
+        dim.backgroundColor = UIColor(white: 0.0, alpha: 0.28)
         dim.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.backgroundTapped)))
         container.addSubview(dim)
 
+        let cardWidth: CGFloat = min(anchor == .admin ? 332.0 : 288.0, window.bounds.width - 28.0)
+
+        // A dark glass card.
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterialDark))
+        blur.layer.cornerRadius = 22.0
+        blur.layer.cornerCurve = .continuous
+        blur.layer.masksToBounds = true
+        blur.layer.borderWidth = 1.0
+        blur.layer.borderColor = UIColor(white: 1.0, alpha: 0.1).cgColor
+        let content = blur.contentView
+
+        // Shadow holder (blur can't both clip and cast a shadow).
         let card = UIView()
-        card.backgroundColor = UIColor(white: 0.12, alpha: 0.97)
-        card.layer.cornerRadius = 16.0
-        card.layer.masksToBounds = true
+        card.layer.cornerRadius = 22.0
+        card.layer.cornerCurve = .continuous
+        card.layer.shadowColor = UIColor.black.cgColor
+        card.layer.shadowOpacity = 0.4
+        card.layer.shadowRadius = 24.0
+        card.layer.shadowOffset = CGSize(width: 0.0, height: 10.0)
+        card.addSubview(blur)
         container.addSubview(card)
 
-        let current = VoiceChanger.shared.effect
-        let rowHeight: CGFloat = 46.0
-        let titleHeight: CGFloat = 52.0
-        let cardWidth: CGFloat = min(280.0, window.bounds.width - 32.0)
+        // Header: emoji chip + title + subtitle.
+        let headerHeight: CGFloat = 64.0
+        let chip = UILabel(frame: CGRect(x: 16.0, y: 14.0, width: 36.0, height: 36.0))
+        chip.text = emoji
+        chip.font = UIFont.systemFont(ofSize: 22.0)
+        chip.textAlignment = .center
+        chip.backgroundColor = (anchor == .admin ? VCPalette.green : VCPalette.accent).withAlphaComponent(0.22)
+        chip.layer.cornerRadius = 10.0
+        chip.layer.cornerCurve = .continuous
+        chip.layer.masksToBounds = true
+        content.addSubview(chip)
 
-        let titleLabel = UILabel()
-        titleLabel.numberOfLines = 2
-        titleLabel.textAlignment = .center
-        titleLabel.textColor = UIColor(white: 1.0, alpha: 0.6)
-        titleLabel.font = UIFont.systemFont(ofSize: 13.0)
-        titleLabel.text = "Голос для дзвінків, голосових і кружечків"
-        titleLabel.frame = CGRect(x: 12.0, y: 0.0, width: cardWidth - 24.0, height: titleHeight)
-        card.addSubview(titleLabel)
+        let titleLabel = UILabel(frame: CGRect(x: 62.0, y: 15.0, width: cardWidth - 74.0, height: 20.0))
+        titleLabel.text = title
+        titleLabel.textColor = VCPalette.primaryText
+        titleLabel.font = UIFont.systemFont(ofSize: 17.0, weight: .semibold)
+        content.addSubview(titleLabel)
+
+        let subtitleLabel = UILabel(frame: CGRect(x: 62.0, y: 35.0, width: cardWidth - 74.0, height: 16.0))
+        subtitleLabel.text = subtitle
+        subtitleLabel.textColor = VCPalette.secondaryText
+        subtitleLabel.font = UIFont.systemFont(ofSize: 12.5)
+        content.addSubview(subtitleLabel)
+
+        let headerSeparator = UIView(frame: CGRect(x: 0.0, y: headerHeight, width: cardWidth, height: 1.0))
+        headerSeparator.backgroundColor = VCPalette.separator
+        content.addSubview(headerSeparator)
 
         let scroll = UIScrollView()
         scroll.alwaysBounceVertical = false
-        scroll.showsVerticalScrollIndicator = true
-        card.addSubview(scroll)
+        scroll.showsVerticalScrollIndicator = false
+        content.addSubview(scroll)
 
-        var y: CGFloat = 0.0
-        for effect in VoiceChangerEffect.allCases {
-            let row = self.makeRow(title: "\(effect.emoji)   \(effect.title)", selected: effect == current, width: cardWidth, height: rowHeight)
-            row.tag = Int(effect.rawValue)
-            row.addTarget(self, action: #selector(self.effectRowTapped(_:)), for: .touchUpInside)
-            row.frame = CGRect(x: 0.0, y: y, width: cardWidth, height: rowHeight)
-            scroll.addSubview(row)
-            y += rowHeight
+        var y: CGFloat = 8.0
+        var index = 0
+        for row in rows {
+            switch row {
+            case let .action(icon, iconColor, title, selected, handler):
+                let rowHeight: CGFloat = 50.0
+                let target = RowActionTarget(action: handler)
+                self.panelTargets.append(target)
+                let view = self.makeActionRow(icon: icon, iconColor: iconColor, title: title, selected: selected, width: cardWidth, height: rowHeight)
+                view.addTarget(target, action: #selector(RowActionTarget.performAction), for: .touchUpInside)
+                view.frame = CGRect(x: 0.0, y: y, width: cardWidth, height: rowHeight)
+                scroll.addSubview(view)
+                y += rowHeight
+                index += 1
+            case let .toggle(icon, iconColor, title, subtitle, isOn, isEnabled, handler):
+                let target = RowActionTarget(toggle: handler)
+                self.panelTargets.append(target)
+                let view = self.makeToggleRow(icon: icon, iconColor: iconColor, title: title, subtitle: subtitle, isOn: isOn, isEnabled: isEnabled, width: cardWidth, target: target)
+                view.frame.origin.y = y
+                scroll.addSubview(view)
+                y += view.frame.height
+                index += 1
+            case .sectionGap:
+                let separator = UIView(frame: CGRect(x: 16.0, y: y + 5.0, width: cardWidth - 32.0, height: 1.0))
+                separator.backgroundColor = VCPalette.separator
+                scroll.addSubview(separator)
+                y += 11.0
+            }
         }
-        let separator = UIView(frame: CGRect(x: 0.0, y: y, width: cardWidth, height: 6.0))
-        separator.backgroundColor = UIColor(white: 0.0, alpha: 0.35)
-        scroll.addSubview(separator)
-        y += 6.0
-        let sizeRow = self.makeRow(title: self.isCompact ? "🔍   Збільшити кнопку" : "🔍   Зменшити кнопку", selected: false, width: cardWidth, height: rowHeight)
-        sizeRow.addTarget(self, action: #selector(self.sizeRowTapped), for: .touchUpInside)
-        sizeRow.frame = CGRect(x: 0.0, y: y, width: cardWidth, height: rowHeight)
-        scroll.addSubview(sizeRow)
-        y += rowHeight
+        y += 8.0
         scroll.contentSize = CGSize(width: cardWidth, height: y)
 
         let insets = window.safeAreaInsets
         let maxCardHeight = window.bounds.height - insets.top - insets.bottom - 24.0
-        let cardHeight = min(titleHeight + y, maxCardHeight)
-        scroll.frame = CGRect(x: 0.0, y: titleHeight, width: cardWidth, height: cardHeight - titleHeight)
+        let cardHeight = min(headerHeight + y, maxCardHeight)
+        scroll.frame = CGRect(x: 0.0, y: headerHeight + 1.0, width: cardWidth, height: cardHeight - headerHeight - 1.0)
 
         // Next to the button, on the side with more room, kept inside the safe area.
         let buttonFrame = button.frame
         var cardX: CGFloat
         if buttonFrame.midX > window.bounds.midX {
-            cardX = buttonFrame.minX - 10.0 - cardWidth
+            cardX = buttonFrame.minX - 12.0 - cardWidth
         } else {
-            cardX = buttonFrame.maxX + 10.0
+            cardX = buttonFrame.maxX + 12.0
         }
         cardX = min(max(cardX, insets.left + 12.0), window.bounds.width - insets.right - 12.0 - cardWidth)
         var cardY = buttonFrame.midY - cardHeight / 2.0
         cardY = min(max(cardY, insets.top + 12.0), window.bounds.height - insets.bottom - 12.0 - cardHeight)
         card.frame = CGRect(x: cardX, y: cardY, width: cardWidth, height: cardHeight)
+        blur.frame = card.bounds
 
-        window.insertSubview(container, belowSubview: button)
+        if let lowest = window.buttons.first {
+            window.insertSubview(container, belowSubview: lowest)
+        } else {
+            window.addSubview(container)
+        }
         window.panelContainer = container
         self.panelContainer = container
 
         container.alpha = 0.0
-        card.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
-        UIView.animate(withDuration: 0.18, animations: {
+        let anchorInContainer = window.convert(buttonFrame.center, to: container)
+        let dx = anchorInContainer.x - card.center.x
+        let dy = anchorInContainer.y - card.center.y
+        card.transform = CGAffineTransform(translationX: dx * 0.12, y: dy * 0.12).scaledBy(x: 0.9, y: 0.9)
+        UIView.animate(withDuration: 0.28, delay: 0.0, usingSpringWithDamping: 0.82, initialSpringVelocity: 0.4, options: [], animations: {
             container.alpha = 1.0
             card.transform = .identity
         })
     }
 
-    private func makeRow(title: String, selected: Bool, width: CGFloat, height: CGFloat) -> UIButton {
+    private func makeActionRow(icon: String, iconColor: UIColor, title: String, selected: Bool, width: CGFloat, height: CGFloat) -> UIButton {
         let row = UIButton(type: .custom)
         row.accessibilityLabel = title
-        let label = UILabel(frame: CGRect(x: 16.0, y: 0.0, width: width - 56.0, height: height))
+
+        let chip = UILabel(frame: CGRect(x: 14.0, y: (height - 32.0) / 2.0, width: 32.0, height: 32.0))
+        chip.text = icon
+        chip.font = UIFont.systemFont(ofSize: 17.0)
+        chip.textAlignment = .center
+        chip.backgroundColor = iconColor.withAlphaComponent(selected ? 0.95 : 0.16)
+        chip.layer.cornerRadius = 9.0
+        chip.layer.cornerCurve = .continuous
+        chip.layer.masksToBounds = true
+        chip.isUserInteractionEnabled = false
+        row.addSubview(chip)
+
+        let label = UILabel(frame: CGRect(x: 56.0, y: 0.0, width: width - 92.0, height: height))
         label.text = title
-        label.textColor = .white
-        label.font = UIFont.systemFont(ofSize: 17.0, weight: selected ? .semibold : .regular)
+        label.textColor = VCPalette.primaryText
+        label.font = UIFont.systemFont(ofSize: 16.0, weight: selected ? .semibold : .regular)
         label.isUserInteractionEnabled = false
         row.addSubview(label)
-        row.backgroundColor = selected ? UIColor(red: 0.45, green: 0.2, blue: 0.95, alpha: 0.55) : .clear
+
         if selected {
-            let check = UILabel(frame: CGRect(x: width - 36.0, y: 0.0, width: 24.0, height: height))
+            let check = UILabel(frame: CGRect(x: width - 40.0, y: 0.0, width: 26.0, height: height))
             check.text = "✓"
-            check.textColor = .white
-            check.font = UIFont.systemFont(ofSize: 18.0, weight: .bold)
+            check.textColor = VCPalette.accent
+            check.font = UIFont.systemFont(ofSize: 17.0, weight: .bold)
             check.isUserInteractionEnabled = false
             row.addSubview(check)
         }
+
+        row.addTarget(row, action: #selector(UIButton.vcFlash), for: .touchDown)
+        return row
+    }
+
+    private func makeToggleRow(icon: String, iconColor: UIColor, title: String, subtitle: String?, isOn: Bool, isEnabled: Bool, width: CGFloat, target: RowActionTarget) -> UIView {
+        let switchView = UISwitch()
+        switchView.isOn = isOn
+        switchView.isEnabled = isEnabled
+        switchView.onTintColor = VCPalette.green
+        switchView.addTarget(target, action: #selector(RowActionTarget.switchChanged(_:)), for: .valueChanged)
+        let switchSize = switchView.intrinsicContentSize
+
+        let textLeft: CGFloat = 56.0
+        let textWidth = width - textLeft - 12.0 - switchSize.width - 14.0
+        let titleLabel = UILabel()
+        titleLabel.numberOfLines = 0
+        titleLabel.text = title
+        titleLabel.textColor = isEnabled ? VCPalette.primaryText : VCPalette.disabledText
+        titleLabel.font = UIFont.systemFont(ofSize: 16.0)
+        let titleSize = titleLabel.sizeThatFits(CGSize(width: textWidth, height: .greatestFiniteMagnitude))
+
+        var subtitleLabel: UILabel?
+        var subtitleSize = CGSize()
+        if let subtitle = subtitle {
+            let label = UILabel()
+            label.numberOfLines = 0
+            label.text = subtitle
+            label.textColor = isEnabled ? VCPalette.secondaryText : VCPalette.disabledText
+            label.font = UIFont.systemFont(ofSize: 12.0)
+            subtitleSize = label.sizeThatFits(CGSize(width: textWidth, height: .greatestFiniteMagnitude))
+            subtitleLabel = label
+        }
+
+        let verticalPadding: CGFloat = 12.0
+        let textHeight = titleSize.height + (subtitleLabel != nil ? 3.0 + subtitleSize.height : 0.0)
+        let height = max(54.0, textHeight + verticalPadding * 2.0)
+
+        let row = UIView(frame: CGRect(x: 0.0, y: 0.0, width: width, height: height))
+
+        let chip = UILabel(frame: CGRect(x: 14.0, y: (height - 32.0) / 2.0, width: 32.0, height: 32.0))
+        chip.text = icon
+        chip.font = UIFont.systemFont(ofSize: 16.0)
+        chip.textAlignment = .center
+        chip.backgroundColor = iconColor.withAlphaComponent(isEnabled ? 0.22 : 0.1)
+        chip.layer.cornerRadius = 9.0
+        chip.layer.cornerCurve = .continuous
+        chip.layer.masksToBounds = true
+        chip.alpha = isEnabled ? 1.0 : 0.5
+        row.addSubview(chip)
+
+        var textY = floor((height - textHeight) / 2.0)
+        titleLabel.frame = CGRect(x: textLeft, y: textY, width: textWidth, height: titleSize.height)
+        row.addSubview(titleLabel)
+        textY += titleSize.height + 3.0
+        if let subtitleLabel = subtitleLabel {
+            subtitleLabel.frame = CGRect(x: textLeft, y: textY, width: textWidth, height: subtitleSize.height)
+            row.addSubview(subtitleLabel)
+        }
+        switchView.frame = CGRect(x: width - 12.0 - switchSize.width, y: floor((height - switchSize.height) / 2.0), width: switchSize.width, height: switchSize.height)
+        row.addSubview(switchView)
         return row
     }
 
@@ -253,10 +549,13 @@ public final class VoiceChangerOverlay: NSObject {
         }
         self.panelContainer = nil
         self.window?.panelContainer = nil
-        UIView.animate(withDuration: 0.15, animations: {
+        UIView.animate(withDuration: 0.18, animations: {
             container.alpha = 0.0
-        }, completion: { _ in
+        }, completion: { [weak self] _ in
             container.removeFromSuperview()
+            if self?.panelContainer == nil {
+                self?.panelTargets.removeAll()
+            }
         })
     }
 
@@ -264,24 +563,18 @@ public final class VoiceChangerOverlay: NSObject {
         self.hidePanel()
     }
 
-    @objc private func effectRowTapped(_ sender: UIButton) {
-        if let effect = VoiceChangerEffect(rawValue: Int32(sender.tag)) {
-            VoiceChanger.shared.setEffect(effect)
-        }
-        self.hidePanel()
-    }
-
-    @objc private func sizeRowTapped() {
-        self.isCompact = !self.isCompact
-        UserDefaults.standard.set(self.isCompact, forKey: VoiceChangerOverlay.compactKey)
-        self.applyAppearance()
-        self.hidePanel()
-    }
-
     // MARK: - Dragging and position
 
-    @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
-        guard let button = self.button, let window = self.window else {
+    @objc private func handleVoicePan(_ recognizer: UIPanGestureRecognizer) {
+        self.handlePan(recognizer, kind: .voice)
+    }
+
+    @objc private func handleAdminPan(_ recognizer: UIPanGestureRecognizer) {
+        self.handlePan(recognizer, kind: .admin)
+    }
+
+    private func handlePan(_ recognizer: UIPanGestureRecognizer, kind: ButtonKind) {
+        guard let button = self.button(kind), let window = self.window else {
             return
         }
         switch recognizer.state {
@@ -292,7 +585,7 @@ public final class VoiceChangerOverlay: NSObject {
             let translation = recognizer.translation(in: window)
             button.center = CGPoint(x: self.panStartCenter.x + translation.x, y: self.panStartCenter.y + translation.y)
         case .ended, .cancelled, .failed:
-            self.snapToEdge()
+            self.snapToEdge(kind)
         default:
             break
         }
@@ -313,8 +606,8 @@ public final class VoiceChangerOverlay: NSObject {
         )
     }
 
-    private func snapToEdge() {
-        guard let button = self.button else {
+    private func snapToEdge(_ kind: ButtonKind) {
+        guard let button = self.button(kind) else {
             return
         }
         let rect = self.allowedRect()
@@ -324,48 +617,66 @@ public final class VoiceChangerOverlay: NSObject {
         UIView.animate(withDuration: 0.25, delay: 0.0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0.0, options: [.allowUserInteraction], animations: {
             button.center = center
         }, completion: nil)
-        self.savePosition(center)
+        self.savePosition(center, kind: kind)
     }
 
-    private func clampButtonIntoView(save: Bool) {
-        guard let button = self.button, let window = self.window, !window.bounds.isEmpty else {
+    private func clampButtonsIntoView() {
+        guard let window = self.window, !window.bounds.isEmpty else {
             return
         }
         let rect = self.allowedRect()
-        var center = button.center
-        center.x = min(max(center.x, rect.minX), rect.maxX)
-        center.y = min(max(center.y, rect.minY), rect.maxY)
-        if center != button.center {
-            button.center = center
-        }
-        if save {
-            self.savePosition(center)
+        for kind in [ButtonKind.voice, ButtonKind.admin] {
+            guard let button = self.button(kind) else {
+                continue
+            }
+            var center = button.center
+            center.x = min(max(center.x, rect.minX), rect.maxX)
+            center.y = min(max(center.y, rect.minY), rect.maxY)
+            if center != button.center {
+                button.center = center
+            }
         }
     }
 
-    private func savePosition(_ center: CGPoint) {
+    private func savePosition(_ center: CGPoint, kind: ButtonKind) {
         guard let window = self.window, window.bounds.width > 0.0, window.bounds.height > 0.0 else {
             return
         }
         // Stored as a fraction of the screen so it survives rotation and different devices.
-        UserDefaults.standard.set(Double(center.x / window.bounds.width), forKey: VoiceChangerOverlay.positionXKey)
-        UserDefaults.standard.set(Double(center.y / window.bounds.height), forKey: VoiceChangerOverlay.positionYKey)
+        UserDefaults.standard.set(Double(center.x / window.bounds.width), forKey: kind.positionPrefix + "X")
+        UserDefaults.standard.set(Double(center.y / window.bounds.height), forKey: kind.positionPrefix + "Y")
     }
 
-    private func restorePosition() {
-        guard let button = self.button, let window = self.window else {
+    private func restorePosition(_ kind: ButtonKind) {
+        guard let button = self.button(kind), let window = self.window else {
             return
         }
         let defaults = UserDefaults.standard
         let rect = self.allowedRect()
-        if defaults.object(forKey: VoiceChangerOverlay.positionXKey) != nil {
-            let x = CGFloat(defaults.double(forKey: VoiceChangerOverlay.positionXKey)) * window.bounds.width
-            let y = CGFloat(defaults.double(forKey: VoiceChangerOverlay.positionYKey)) * window.bounds.height
+        if defaults.object(forKey: kind.positionPrefix + "X") != nil {
+            let x = CGFloat(defaults.double(forKey: kind.positionPrefix + "X")) * window.bounds.width
+            let y = CGFloat(defaults.double(forKey: kind.positionPrefix + "Y")) * window.bounds.height
             button.center = CGPoint(x: x, y: y)
         } else {
-            // Default: right edge, a bit above the middle (clear of the chat input panel).
-            button.center = CGPoint(x: rect.maxX, y: rect.minY + rect.height * 0.38)
+            // Default: right edge, clear of the chat input panel.
+            button.center = CGPoint(x: rect.maxX, y: rect.minY + rect.height * kind.defaultYFraction)
         }
-        self.clampButtonIntoView(save: false)
+        self.clampButtonsIntoView()
+    }
+}
+
+private extension UIButton {
+    @objc func vcFlash() {
+        let highlight = UIColor(white: 1.0, alpha: 0.08)
+        self.backgroundColor = highlight
+        UIView.animate(withDuration: 0.3) {
+            self.backgroundColor = .clear
+        }
+    }
+}
+
+private extension CGRect {
+    var center: CGPoint {
+        return CGPoint(x: self.midX, y: self.midY)
     }
 }
