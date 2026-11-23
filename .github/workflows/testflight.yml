@@ -19,7 +19,8 @@ on:
 
 jobs:
   build:
-    runs-on: macos-26
+    # Telegram needs Xcode 27.1 (versions.json); GitHub's xcode-27 image has it.
+    runs-on: xcode-27
     timeout-minutes: 360
 
     steps:
@@ -32,11 +33,6 @@ jobs:
         run: |
           set +e
           df -h /
-          # Keep only the newest Xcode; drop other Xcodes, simulators and SDKs we do not need.
-          NEWEST_XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
-          for x in /Applications/Xcode_*.app; do
-            if [ "$x" != "$NEWEST_XCODE" ] && [ ! -L "$x" ]; then sudo rm -rf "$x"; fi
-          done
           sudo rm -rf ~/Library/Android /usr/local/share/dotnet /usr/local/lib/node_modules ~/.dotnet ~/.cargo ~/.rustup /opt/homebrew/Caskroom 2>/dev/null
           xcrun simctl delete all 2>/dev/null
           sudo rm -rf ~/Library/Developer/CoreSimulator/Caches 2>/dev/null

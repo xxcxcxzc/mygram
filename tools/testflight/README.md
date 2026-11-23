@@ -84,6 +84,6 @@ GitHub → **Actions** → **TestFlight** → **Run workflow**. Перша зб�
 ## Якщо щось не так
 - **«is not in the App Group»**: крок 4 не завершено для якогось ідентифікатора.
 - **Нестача місця на диску / тайм-аут**: у `.github/workflows/testflight.yml` заміни
-  `runs-on: macos-26` на більший платний runner (`macos-26-xlarge`).
+  `runs-on: xcode-27` на більший платний runner (`xcode-27-xlarge`).
 - **Немає потрібного Xcode**: workflow бере найновіший встановлений і пише попередження.
   Якщо збірка падає саме через версію, вкажи потрібну версію в кроці «Select Xcode».
