@@ -1,0 +1,170 @@
+name: TestFlight
+
+# Builds the app on a GitHub macOS runner, signs it with your Apple distribution certificate
+# and uploads it to TestFlight. Start it from the Actions tab ("Run workflow").
+#
+# Repository secrets (Settings > Secrets and variables > Actions), see tools/testflight/README.md:
+#   APPLE_TEAM_ID      your 10-character Team ID
+#   BUNDLE_ID          e.g. com.yourname.voicetg (the same as in App Store Connect)
+#   TG_API_ID          from my.telegram.org
+#   TG_API_HASH        from my.telegram.org
+#   ASC_KEY_ID         App Store Connect API key id
+#   ASC_ISSUER_ID      App Store Connect API issuer id
+#   ASC_KEY_P8         contents of AuthKey_XXXX.p8
+#   DIST_KEY_PEM       contents of distribution_key.pem   (made by tools/testflight/asc.py init-cert)
+#   DIST_CERT_B64      base64 of distribution.cer          (made by tools/testflight/asc.py init-cert)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          set +e
+          df -h /
+          # Keep only the newest Xcode; drop other Xcodes, simulators and SDKs we do not need.
+          NEWEST_XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          for x in /Applications/Xcode_*.app; do
+            if [ "$x" != "$NEWEST_XCODE" ] && [ ! -L "$x" ]; then sudo rm -rf "$x"; fi
+          done
+          sudo rm -rf ~/Library/Android /usr/local/share/dotnet /usr/local/lib/node_modules ~/.dotnet ~/.cargo ~/.rustup /opt/homebrew/Caskroom 2>/dev/null
+          xcrun simctl delete all 2>/dev/null
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches 2>/dev/null
+          df -h /
+
+      - name: Select Xcode
+        run: |
+          WANTED=$(python3 -c 'import json;print(json.load(open("versions.json"))["xcode"])')
+          if [ -d "/Applications/Xcode_$WANTED.app" ]; then
+            XCODE="/Applications/Xcode_$WANTED.app"
+          else
+            XCODE=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+            echo "::warning::Xcode $WANTED is not installed on this runner, using $XCODE"
+          fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Check secrets
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          DIST_KEY_PEM: ${{ secrets.DIST_KEY_PEM }}
+          DIST_CERT_B64: ${{ secrets.DIST_CERT_B64 }}
+        run: |
+          missing=0
+          for name in APPLE_TEAM_ID BUNDLE_ID TG_API_ID TG_API_HASH ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 DIST_KEY_PEM DIST_CERT_B64; do
+            if [ -z "${!name}" ]; then echo "::error::Secret $name is not set"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Prepare configuration and code signing
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          DIST_KEY_PEM: ${{ secrets.DIST_KEY_PEM }}
+          DIST_CERT_B64: ${{ secrets.DIST_CERT_B64 }}
+        run: |
+          set -e
+          SIGN_DIR="$RUNNER_TEMP/codesigning"
+          mkdir -p "$SIGN_DIR/certs" "$SIGN_DIR/profiles"
+
+          # Configuration (kept out of the repository: api_hash is a secret).
+          python3 - <<'EOF'
+          import json, os
+          config = {
+              "bundle_id": os.environ["BUNDLE_ID"],
+              "api_id": os.environ["TG_API_ID"],
+              "api_hash": os.environ["TG_API_HASH"],
+              "team_id": os.environ["APPLE_TEAM_ID"],
+              "is_internal_build": "false",
+              "is_appstore_build": "true",
+              "appstore_id": "0",
+              "app_specific_url_scheme": "tgvoice",
+              "premium_iap_product_id": "",
+              "enable_siri": False,
+              "enable_icloud": False,
+          }
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "configuration.json"), "w") as f:
+              json.dump(config, f, indent=2)
+          EOF
+
+          # Distribution certificate -> .p12 with an empty password (what ImportCertificates.py expects).
+          printf '%s\n' "$DIST_KEY_PEM" > "$RUNNER_TEMP/dist_key.pem"
+          echo "$DIST_CERT_B64" | base64 --decode > "$RUNNER_TEMP/distribution.cer"
+          openssl x509 -inform der -in "$RUNNER_TEMP/distribution.cer" -out "$RUNNER_TEMP/distribution.pem"
+          openssl pkcs12 -export -inkey "$RUNNER_TEMP/dist_key.pem" -in "$RUNNER_TEMP/distribution.pem" \
+            -out "$SIGN_DIR/certs/distribution.p12" -passout pass:
+          rm -f "$RUNNER_TEMP/dist_key.pem"
+
+          # Bundle ids and fresh App Store provisioning profiles via the App Store Connect API.
+          python3 -m pip install --quiet --break-system-packages cryptography || python3 -m pip install --quiet cryptography
+          python3 tools/testflight/asc.py ensure-ids --bundle-id "$BUNDLE_ID"
+          python3 tools/testflight/asc.py profiles --bundle-id "$BUNDLE_ID" --cert "$RUNNER_TEMP/distribution.cer" --out "$SIGN_DIR/profiles"
+
+          python3 build-system/Make/ImportCertificates.py --path "$SIGN_DIR/certs"
+          echo "SIGN_DIR=$SIGN_DIR" >> "$GITHUB_ENV"
+
+      - name: Restore Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: ~/telegram-bazel-cache
+          key: bazel-${{ runner.os }}-${{ hashFiles('versions.json') }}-${{ github.sha }}
+          restore-keys: |
+            bazel-${{ runner.os }}-${{ hashFiles('versions.json') }}-
+
+      - name: Build
+        run: |
+          set -e
+          BUILD_NUMBER=$(( $(cat build_number_offset) + ${{ github.run_number }} ))
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          python3 -u build-system/Make/Make.py \
+            --overrideXcodeVersion \
+            --cacheDir="$HOME/telegram-bazel-cache" \
+            build \
+            --configurationPath="$RUNNER_TEMP/configuration.json" \
+            --codesigningInformationPath="$SIGN_DIR" \
+            --configuration=release_arm64 \
+            --buildNumber="$BUILD_NUMBER" \
+            --outputBuildArtifactsPath="$GITHUB_WORKSPACE/build/artifacts"
+          ls -la build/artifacts
+
+      - name: Keep the IPA (3 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipa-${{ env.BUILD_NUMBER }}
+          path: build/artifacts/Telegram.ipa
+          retention-days: 3
+
+      - name: Upload to TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -e
+          mkdir -p ~/.appstoreconnect/private_keys
+          printf '%s\n' "$ASC_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
+          xcrun altool --upload-app --type ios \
+            --file build/artifacts/Telegram.ipa \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo "Uploaded build $BUILD_NUMBER. It appears in App Store Connect > TestFlight after Apple finishes processing (5-30 min)."
