@@ -2217,6 +2217,7 @@ public final class PendingMessageManager {
     
     private func applySentMessage(postbox: Postbox, stateManager: AccountStateManager, message: Message, content: PendingMessageUploadedContentAndReuploadInfo, result: Api.Updates) -> Signal<Void, NoError> {
         myGramReportOfflineAfterSend(network: self.network)
+        myGramMarkReadAfterReply(network: self.network, stateManager: stateManager, peer: message.peers[message.id.peerId])
         if let _ = message.peers[message.id.peerId] as? TelegramChannel {
             for attribute in message.attributes {
                 if let attribute = attribute as? PaidStarsMessageAttribute {
@@ -2282,6 +2283,7 @@ public final class PendingMessageManager {
     
     private func applySentGroupMessages(postbox: Postbox, stateManager: AccountStateManager, messages: [Message], result: Api.Updates) -> Signal<Void, NoError> {
         myGramReportOfflineAfterSend(network: self.network)
+        myGramMarkReadAfterReply(network: self.network, stateManager: stateManager, peer: messages.first.flatMap { $0.peers[$0.id.peerId] })
         var namespace = Namespaces.Message.Cloud
         if let message = messages.first {
             if let channel = message.peers[message.id.peerId] as? TelegramChannel, channel.isMonoForum {

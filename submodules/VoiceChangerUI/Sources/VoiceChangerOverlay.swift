@@ -286,7 +286,7 @@ public final class VoiceChangerOverlay: NSObject {
             .toggle(icon: "🚪", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "«Не в мережі» після відправки", subtitle: "Одразу після повідомлення знову ставить «не в мережі»", isOn: MyGramSettings.ghostOfflineAfterSend, isEnabled: ghost, handler: { value in
                 MyGramSettings.ghostOfflineAfterSend = value
             }),
-            .toggle(icon: "✓", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "Не позначати прочитаним", subtitle: "Співрозмовник не бачить, що ти прочитав(ла)", isOn: MyGramSettings.ghostNoReadReceipts, isEnabled: ghost, handler: { value in
+            .toggle(icon: "✓", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "Прочитано лише після відповіді", subtitle: "Співрозмовник побачить «прочитано» тільки коли ти відповіси в цьому чаті", isOn: MyGramSettings.ghostNoReadReceipts, isEnabled: true, handler: { value in
                 MyGramSettings.ghostNoReadReceipts = value
             })
         ]

@@ -20,7 +20,7 @@ public final class MyGramSettings {
             MyGramSettings.ghostHideOnlineKey: true,
             MyGramSettings.ghostOfflineAfterSendKey: true,
             MyGramSettings.ghostHideTypingKey: true,
-            MyGramSettings.ghostNoReadReceiptsKey: false
+            MyGramSettings.ghostNoReadReceiptsKey: true
         ])
     }()
 
@@ -59,7 +59,7 @@ public final class MyGramSettings {
         set { writeFlag(ghostHideTypingKey, newValue) }
     }
 
-    /// Don't send read receipts (messages stay unread for the sender).
+    /// Don't send read receipts while just reading; the chat is marked read only when I reply in it.
     public static var ghostNoReadReceipts: Bool {
         get { return readFlag(ghostNoReadReceiptsKey) }
         set { writeFlag(ghostNoReadReceiptsKey, newValue) }
@@ -137,5 +137,38 @@ func myGramReportOfflineAfterSend(network: Network) {
 }
 
 func myGramHideReadReceipts() -> Bool {
-    return MyGramSettings.ghostHideOnline && MyGramSettings.ghostNoReadReceipts
+    return MyGramSettings.ghostNoReadReceipts
+}
+
+/// "Read only after my reply": when a message is sent while read receipts are held back, mark
+/// everything in that chat as read on the server.
+func myGramMarkReadAfterReply(network: Network, stateManager: AccountStateManager, peer: Peer?) {
+    guard myGramHideReadReceipts(), let peer = peer else {
+        return
+    }
+    if peer.id.namespace == Namespaces.Peer.CloudChannel {
+        guard let inputChannel = apiInputChannel(peer) else {
+            return
+        }
+        let _ = (network.request(Api.functions.channels.readHistory(channel: inputChannel, maxId: Int32.max - 1))
+        |> `catch` { _ -> Signal<Api.Bool, NoError> in
+            return .single(.boolFalse)
+        }).start()
+    } else if peer.id.namespace == Namespaces.Peer.CloudUser || peer.id.namespace == Namespaces.Peer.CloudGroup {
+        guard let inputPeer = apiInputPeer(peer) else {
+            return
+        }
+        let _ = (network.request(Api.functions.messages.readHistory(peer: inputPeer, maxId: Int32.max - 1))
+        |> map(Optional.init)
+        |> `catch` { _ -> Signal<Api.messages.AffectedMessages?, NoError> in
+            return .single(nil)
+        }).start(next: { result in
+            if let result = result {
+                switch result {
+                case let .affectedMessages(affectedMessagesData):
+                    stateManager.addUpdateGroups([.updatePts(pts: affectedMessagesData.pts, ptsCount: affectedMessagesData.ptsCount)])
+                }
+            }
+        })
+    }
 }
