@@ -175,7 +175,7 @@ private func requestActivity(postbox: Postbox, network: Network, accountPeerId: 
                 }
             }
             
-            if MyGramSettings.ghostHideOnline && MyGramSettings.ghostHideTyping {
+            if MyGramSettings.ghostHideOnline && MyGramSettings.ghostHideTyping && MyGramSettings.applies(.typing, peerId: peerId.toInt64()) {
                 // MyGram ghost mode: don't send "typing…".
                 return .complete()
             }

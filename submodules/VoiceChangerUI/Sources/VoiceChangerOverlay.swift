@@ -47,6 +47,10 @@ private enum VCPalette {
 private enum PanelRow {
     case action(icon: String, iconColor: UIColor, title: String, selected: Bool, handler: () -> Void)
     case toggle(icon: String, iconColor: UIColor, title: String, subtitle: String?, isOn: Bool, isEnabled: Bool, handler: (Bool) -> Void)
+    case navigation(icon: String, title: String, value: String, handler: () -> Void)
+    case segments(items: [String], selected: Int, handler: (Int) -> Void)
+    case check(title: String, checked: Bool, isEnabled: Bool, handler: (Bool) -> Void)
+    case note(String)
     case sectionGap
 }
 
@@ -70,6 +74,21 @@ private final class RowActionTarget: NSObject {
 
     @objc func switchChanged(_ sender: UISwitch) {
         self.toggle?(sender.isOn)
+    }
+
+    var segment: ((Int) -> Void)?
+
+    @objc func segmentChanged(_ sender: UISegmentedControl) {
+        self.segment?(sender.selectedSegmentIndex)
+    }
+
+    var checked: Bool = false
+    weak var checkView: UIView?
+
+    @objc func checkTapped() {
+        self.checked = !self.checked
+        self.checkView?.isHidden = !self.checked
+        self.toggle?(self.checked)
     }
 }
 
@@ -106,6 +125,9 @@ public final class VoiceChangerOverlay: NSObject {
     private var panelTargets: [RowActionTarget] = []
     private var isCompact: Bool = UserDefaults.standard.bool(forKey: VoiceChangerOverlay.compactKey)
     private var panStartCenter: CGPoint = CGPoint()
+
+    /// Set by the app: loads the user's chats (id as `PeerId.toInt64()`, title) for the lists.
+    public var loadPeers: ((@escaping ([(id: Int64, title: String)]) -> Void) -> Void)?
 
     private override init() {
         super.init()
@@ -265,13 +287,14 @@ public final class VoiceChangerOverlay: NSObject {
         self.showPanel(emoji: "🎭", title: "Зміна голосу", subtitle: "Діє в дзвінках, голосових і кружечках", rows: rows, anchor: .voice)
     }
 
-    private func showAdminPanel() {
+    private func showAdminPanel(animated: Bool = true) {
         let ghost = MyGramSettings.ghostHideOnline
         let rows: [PanelRow] = [
             .toggle(icon: "🗑", iconColor: UIColor(red: 0.95, green: 0.45, blue: 0.4, alpha: 1.0), title: "Видалені повідомлення", subtitle: "Не зникають з чату, а позначаються «видалено»", isOn: MyGramSettings.showDeletedMessages, isEnabled: true, handler: { [weak self] value in
                 MyGramSettings.showDeletedMessages = value
                 self?.applyAppearance()
             }),
+            self.listRow(.deleted),
             .sectionGap,
             .toggle(icon: "👻", iconColor: VCPalette.accent, title: "Режим привида", subtitle: "Ніхто не бачить, що ти в мережі, і час «був(ла)» не оновлюється", isOn: ghost, isEnabled: true, handler: { [weak self] value in
                 MyGramSettings.ghostHideOnline = value
@@ -283,14 +306,105 @@ public final class VoiceChangerOverlay: NSObject {
             .toggle(icon: "⌨️", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "Ховати «друкує…»", subtitle: nil, isOn: MyGramSettings.ghostHideTyping, isEnabled: ghost, handler: { value in
                 MyGramSettings.ghostHideTyping = value
             }),
+            self.listRow(.typing),
             .toggle(icon: "🚪", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "«Не в мережі» після відправки", subtitle: "Одразу після повідомлення знову ставить «не в мережі»", isOn: MyGramSettings.ghostOfflineAfterSend, isEnabled: ghost, handler: { value in
                 MyGramSettings.ghostOfflineAfterSend = value
             }),
             .toggle(icon: "✓", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "Прочитано лише після відповіді", subtitle: "Співрозмовник побачить «прочитано» тільки коли ти відповіси в цьому чаті", isOn: MyGramSettings.ghostNoReadReceipts, isEnabled: true, handler: { value in
                 MyGramSettings.ghostNoReadReceipts = value
+            }),
+            self.listRow(.reads),
+            .note("Статус «в мережі» Telegram зберігає один для всіх, тому його не можна сховати лише від частини людей. Для цього є винятки у вбудованих налаштуваннях приватності Telegram.")
+        ]
+        self.showPanel(emoji: "🛡", title: "MyGram", subtitle: "Додаткові можливості", rows: rows, anchor: .admin, animated: animated)
+    }
+
+    private func featureTitle(_ feature: MyGramFeature) -> String {
+        switch feature {
+        case .deleted: return "Видалені повідомлення"
+        case .typing: return "Ховати «друкує…»"
+        case .reads: return "Прочитано лише після відповіді"
+        }
+    }
+
+    private func listSummary(_ feature: MyGramFeature) -> String {
+        let count = MyGramSettings.listPeers(feature).count
+        switch MyGramSettings.listMode(feature) {
+        case .everyone: return "Усі"
+        case .everyoneExcept: return "Усі, крім \(count)"
+        case .onlyThese: return "Лише \(count)"
+        }
+    }
+
+    private func listRow(_ feature: MyGramFeature) -> PanelRow {
+        return .navigation(icon: "👥", title: "Для кого", value: self.listSummary(feature), handler: { [weak self] in
+            self?.openList(feature)
+        })
+    }
+
+    private func openList(_ feature: MyGramFeature) {
+        guard let loadPeers = self.loadPeers else {
+            self.replacePanel { $0.showListPanel(feature, peers: []) }
+            return
+        }
+        loadPeers({ [weak self] peers in
+            DispatchQueue.main.async {
+                self?.replacePanel { $0.showListPanel(feature, peers: peers) }
+            }
+        })
+    }
+
+    /// Swaps the open panel for another one without the fade-out.
+    private func replacePanel(_ show: (VoiceChangerOverlay) -> Void) {
+        if let container = self.panelContainer {
+            container.removeFromSuperview()
+            self.panelContainer = nil
+            self.window?.panelContainer = nil
+        }
+        show(self)
+    }
+
+    private func showListPanel(_ feature: MyGramFeature, peers: [(id: Int64, title: String)]) {
+        let mode = MyGramSettings.listMode(feature)
+        let selected = MyGramSettings.listPeers(feature)
+        var rows: [PanelRow] = [
+            .action(icon: "‹", iconColor: UIColor(white: 1.0, alpha: 0.12), title: "Назад", selected: false, handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showAdminPanel(animated: false) }
+                }
+            }),
+            .segments(items: ["Усі", "Усі, крім", "Лише"], selected: mode.rawValue, handler: { [weak self] index in
+                MyGramSettings.setListMode(feature, MyGramListMode(rawValue: index) ?? .everyone)
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showListPanel(feature, peers: peers) }
+                }
             })
         ]
-        self.showPanel(emoji: "🛡", title: "MyGram", subtitle: "Додаткові можливості", rows: rows, anchor: .admin)
+        switch mode {
+        case .everyone:
+            rows.append(.note("Працює в усіх чатах. Вибери «Усі, крім» або «Лише», щоб позначити людей."))
+        case .everyoneExcept:
+            rows.append(.note("Познач чати, де функція НЕ працюватиме."))
+        case .onlyThese:
+            rows.append(.note("Познач чати, де функція працюватиме."))
+        }
+        if peers.isEmpty {
+            rows.append(.note("Чати ще не завантажились. Відкрий список ще раз за хвилинку."))
+        }
+        let ordered = peers.filter { selected.contains($0.id) } + peers.filter { !selected.contains($0.id) }
+        for peer in ordered {
+            let peerId = peer.id
+            rows.append(.check(title: peer.title, checked: selected.contains(peerId), isEnabled: mode != .everyone, handler: { value in
+                var current = MyGramSettings.listPeers(feature)
+                if value {
+                    current.insert(peerId)
+                } else {
+                    current.remove(peerId)
+                }
+                MyGramSettings.setListPeers(feature, current)
+            }))
+        }
+        self.showPanel(emoji: "👥", title: self.featureTitle(feature), subtitle: "Для кого працює", rows: rows, anchor: .admin, animated: false)
     }
 
     private func reloadAdminPanel() {
@@ -301,11 +415,10 @@ public final class VoiceChangerOverlay: NSObject {
         self.panelContainer = nil
         self.window?.panelContainer = nil
         self.panelTargets.removeAll()
-        self.showAdminPanel()
-        self.panelContainer?.alpha = 1.0
+        self.showAdminPanel(animated: false)
     }
 
-    private func showPanel(emoji: String, title: String, subtitle: String, rows: [PanelRow], anchor: ButtonKind) {
+    private func showPanel(emoji: String, title: String, subtitle: String, rows: [PanelRow], anchor: ButtonKind, animated: Bool = true) {
         guard let window = self.window, let button = self.button(anchor) else {
             return
         }
@@ -401,6 +514,47 @@ public final class VoiceChangerOverlay: NSObject {
                 scroll.addSubview(view)
                 y += view.frame.height
                 index += 1
+            case let .navigation(icon, title, value, handler):
+                let rowHeight: CGFloat = 44.0
+                let target = RowActionTarget(action: handler)
+                self.panelTargets.append(target)
+                let view = self.makeNavigationRow(icon: icon, title: title, value: value, width: cardWidth, height: rowHeight)
+                view.addTarget(target, action: #selector(RowActionTarget.performAction), for: .touchUpInside)
+                view.frame = CGRect(x: 0.0, y: y, width: cardWidth, height: rowHeight)
+                scroll.addSubview(view)
+                y += rowHeight
+            case let .segments(items, selectedIndex, handler):
+                let target = RowActionTarget(action: {})
+                target.segment = handler
+                self.panelTargets.append(target)
+                let control = UISegmentedControl(items: items)
+                control.selectedSegmentIndex = selectedIndex
+                control.selectedSegmentTintColor = VCPalette.green
+                control.setTitleTextAttributes([.foregroundColor: UIColor.white], for: .normal)
+                control.setTitleTextAttributes([.foregroundColor: UIColor.white, .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold)], for: .selected)
+                control.addTarget(target, action: #selector(RowActionTarget.segmentChanged(_:)), for: .valueChanged)
+                control.frame = CGRect(x: 14.0, y: y + 6.0, width: cardWidth - 28.0, height: 32.0)
+                scroll.addSubview(control)
+                y += 44.0
+            case let .check(title, checked, isEnabled, handler):
+                let rowHeight: CGFloat = 44.0
+                let target = RowActionTarget(toggle: handler)
+                target.checked = checked
+                self.panelTargets.append(target)
+                let view = self.makeCheckRow(title: title, checked: checked, isEnabled: isEnabled, width: cardWidth, height: rowHeight, target: target)
+                view.frame = CGRect(x: 0.0, y: y, width: cardWidth, height: rowHeight)
+                scroll.addSubview(view)
+                y += rowHeight
+            case let .note(text):
+                let label = UILabel()
+                label.numberOfLines = 0
+                label.text = text
+                label.textColor = VCPalette.secondaryText
+                label.font = UIFont.systemFont(ofSize: 12.0)
+                let size = label.sizeThatFits(CGSize(width: cardWidth - 32.0, height: .greatestFiniteMagnitude))
+                label.frame = CGRect(x: 16.0, y: y + 6.0, width: cardWidth - 32.0, height: size.height)
+                scroll.addSubview(label)
+                y += size.height + 12.0
             case .sectionGap:
                 let separator = UIView(frame: CGRect(x: 16.0, y: y + 5.0, width: cardWidth - 32.0, height: 1.0))
                 separator.backgroundColor = VCPalette.separator
@@ -438,6 +592,9 @@ public final class VoiceChangerOverlay: NSObject {
         window.panelContainer = container
         self.panelContainer = container
 
+        if !animated {
+            return
+        }
         container.alpha = 0.0
         let anchorInContainer = window.convert(buttonFrame.center, to: container)
         let dx = anchorInContainer.x - card.center.x
@@ -481,6 +638,69 @@ public final class VoiceChangerOverlay: NSObject {
         }
 
         row.addTarget(row, action: #selector(UIButton.vcFlash), for: .touchDown)
+        return row
+    }
+
+    private func makeNavigationRow(icon: String, title: String, value: String, width: CGFloat, height: CGFloat) -> UIButton {
+        let row = UIButton(type: .custom)
+        row.accessibilityLabel = "\(title): \(value)"
+        let iconLabel = UILabel(frame: CGRect(x: 56.0, y: 0.0, width: 22.0, height: height))
+        iconLabel.text = icon
+        iconLabel.font = UIFont.systemFont(ofSize: 14.0)
+        iconLabel.isUserInteractionEnabled = false
+        row.addSubview(iconLabel)
+        let titleLabel = UILabel(frame: CGRect(x: 80.0, y: 0.0, width: width - 200.0, height: height))
+        titleLabel.text = title
+        titleLabel.textColor = VCPalette.secondaryText
+        titleLabel.font = UIFont.systemFont(ofSize: 14.0)
+        titleLabel.isUserInteractionEnabled = false
+        row.addSubview(titleLabel)
+        let valueLabel = UILabel(frame: CGRect(x: width - 150.0, y: 0.0, width: 118.0, height: height))
+        valueLabel.text = value
+        valueLabel.textAlignment = .right
+        valueLabel.textColor = VCPalette.green
+        valueLabel.font = UIFont.systemFont(ofSize: 14.0, weight: .medium)
+        valueLabel.isUserInteractionEnabled = false
+        row.addSubview(valueLabel)
+        let chevron = UILabel(frame: CGRect(x: width - 28.0, y: 0.0, width: 16.0, height: height))
+        chevron.text = "›"
+        chevron.textColor = VCPalette.secondaryText
+        chevron.font = UIFont.systemFont(ofSize: 20.0)
+        chevron.isUserInteractionEnabled = false
+        row.addSubview(chevron)
+        row.addTarget(row, action: #selector(UIButton.vcFlash), for: .touchDown)
+        return row
+    }
+
+    private func makeCheckRow(title: String, checked: Bool, isEnabled: Bool, width: CGFloat, height: CGFloat, target: RowActionTarget) -> UIView {
+        let row = UIButton(type: .custom)
+        row.isEnabled = isEnabled
+        row.accessibilityLabel = title
+        let circle = UIView(frame: CGRect(x: 16.0, y: (height - 22.0) / 2.0, width: 22.0, height: 22.0))
+        circle.layer.cornerRadius = 11.0
+        circle.layer.borderWidth = 1.5
+        circle.layer.borderColor = UIColor(white: 1.0, alpha: isEnabled ? 0.4 : 0.15).cgColor
+        circle.isUserInteractionEnabled = false
+        row.addSubview(circle)
+        let fill = UILabel(frame: circle.bounds)
+        fill.text = "✓"
+        fill.textAlignment = .center
+        fill.textColor = .white
+        fill.font = UIFont.systemFont(ofSize: 13.0, weight: .bold)
+        fill.backgroundColor = VCPalette.green
+        fill.layer.cornerRadius = 11.0
+        fill.layer.masksToBounds = true
+        fill.isHidden = !checked
+        fill.alpha = isEnabled ? 1.0 : 0.4
+        circle.addSubview(fill)
+        target.checkView = fill
+        let label = UILabel(frame: CGRect(x: 50.0, y: 0.0, width: width - 66.0, height: height))
+        label.text = title
+        label.textColor = isEnabled ? VCPalette.primaryText : VCPalette.disabledText
+        label.font = UIFont.systemFont(ofSize: 15.0)
+        label.isUserInteractionEnabled = false
+        row.addSubview(label)
+        row.addTarget(target, action: #selector(RowActionTarget.checkTapped), for: .touchUpInside)
         return row
     }
 

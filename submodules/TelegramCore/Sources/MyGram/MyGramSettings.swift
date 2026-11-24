@@ -66,6 +66,54 @@ public final class MyGramSettings {
     }
 }
 
+/// Features that can be limited to some chats.
+public enum MyGramFeature: String, CaseIterable {
+    case deleted
+    case typing
+    case reads
+}
+
+/// Who a feature works for.
+public enum MyGramListMode: Int {
+    case everyone = 0
+    case everyoneExcept = 1
+    case onlyThese = 2
+}
+
+public extension MyGramSettings {
+    static func listMode(_ feature: MyGramFeature) -> MyGramListMode {
+        return MyGramListMode(rawValue: UserDefaults.standard.integer(forKey: "mygram.list.\(feature.rawValue).mode")) ?? .everyone
+    }
+
+    static func setListMode(_ feature: MyGramFeature, _ mode: MyGramListMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: "mygram.list.\(feature.rawValue).mode")
+        NotificationCenter.default.post(name: MyGramSettings.didChangeNotification, object: nil)
+    }
+
+    /// Chats in the list, as `PeerId.toInt64()` values.
+    static func listPeers(_ feature: MyGramFeature) -> Set<Int64> {
+        let values = UserDefaults.standard.array(forKey: "mygram.list.\(feature.rawValue).peers") as? [NSNumber] ?? []
+        return Set(values.map { $0.int64Value })
+    }
+
+    static func setListPeers(_ feature: MyGramFeature, _ peers: Set<Int64>) {
+        UserDefaults.standard.set(peers.map { NSNumber(value: $0) }, forKey: "mygram.list.\(feature.rawValue).peers")
+        NotificationCenter.default.post(name: MyGramSettings.didChangeNotification, object: nil)
+    }
+
+    /// Whether the feature works in the chat with this peer.
+    static func applies(_ feature: MyGramFeature, peerId: Int64) -> Bool {
+        switch MyGramSettings.listMode(feature) {
+        case .everyone:
+            return true
+        case .everyoneExcept:
+            return !MyGramSettings.listPeers(feature).contains(peerId)
+        case .onlyThese:
+            return MyGramSettings.listPeers(feature).contains(peerId)
+        }
+    }
+}
+
 /// Marks a message that the server deleted while "show deleted messages" was on.
 public final class MyGramDeletedMessageAttribute: MessageAttribute {
     public let date: Int32
@@ -105,7 +153,7 @@ func myGramMarkMessagesDeleted(transaction: Transaction, ids: [MessageId]) -> Se
     var kept = Set<MessageId>()
     let timestamp = Int32(Date().timeIntervalSince1970)
     for id in ids {
-        guard myGramShouldKeepDeletedMessage(id), transaction.getMessage(id) != nil else {
+        guard myGramShouldKeepDeletedMessage(id), MyGramSettings.applies(.deleted, peerId: id.peerId.toInt64()), transaction.getMessage(id) != nil else {
             continue
         }
         kept.insert(id)
@@ -136,14 +184,14 @@ func myGramReportOfflineAfterSend(network: Network) {
     }
 }
 
-func myGramHideReadReceipts() -> Bool {
-    return MyGramSettings.ghostNoReadReceipts
+func myGramHideReadReceipts(peerId: PeerId) -> Bool {
+    return MyGramSettings.ghostNoReadReceipts && MyGramSettings.applies(.reads, peerId: peerId.toInt64())
 }
 
 /// "Read only after my reply": when a message is sent while read receipts are held back, mark
 /// everything in that chat as read on the server.
 func myGramMarkReadAfterReply(network: Network, stateManager: AccountStateManager, peer: Peer?) {
-    guard myGramHideReadReceipts(), let peer = peer else {
+    guard let peer = peer, myGramHideReadReceipts(peerId: peer.id) else {
         return
     }
     if peer.id.namespace == Namespaces.Peer.CloudChannel {

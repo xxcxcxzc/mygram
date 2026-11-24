@@ -1815,6 +1815,18 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
 
         // Floating voice changer button (calls, voice messages, round videos).
         VoiceChangerOverlay.shared.install(windowScene: scene)
+        // MyGram lists ("for whom"): the chats of the current account, most recent first.
+        VoiceChangerOverlay.shared.loadPeers = { [weak self] completion in
+            guard let context = self?.contextValue?.context else {
+                completion([])
+                return
+            }
+            let _ = (context.engine.messages.chatListPeers(group: .root, filterPredicate: nil, count: 400)
+            |> take(1)
+            |> deliverOnMainQueue).start(next: { peers, _ in
+                completion(peers.map { (id: $0.id.toInt64(), title: $0.debugDisplayTitle) })
+            })
+        }
 
         for context in connectionOptions.urlContexts {
             let url = context.url
