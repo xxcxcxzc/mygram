@@ -19,6 +19,8 @@ private final class AccountPresenceManagerImpl {
     private var wasOnline: Bool = false
     private var settingsObserver: NSObjectProtocol?
     private var ghostHideOnline: Bool = MyGramSettings.ghostHideOnline
+    private var ghostOfflineTimer: SignalKitTimer?
+    private let ghostRequestDisposable = MetaDisposable()
     
     init(queue: Queue, shouldKeepOnlinePresence: Signal<Bool, NoError>, network: Network) {
         self.queue = queue
@@ -46,7 +48,12 @@ private final class AccountPresenceManagerImpl {
                 if self.ghostHideOnline != ghostHideOnline {
                     self.ghostHideOnline = ghostHideOnline
                     // Switched on: go offline now. Switched off: back to the normal status.
-                    self.updatePresence(ghostHideOnline ? false : self.wasOnline, force: true)
+                    if ghostHideOnline {
+                        self.updatePresence(false, force: true)
+                        self.updateGhostOfflineTimer(appIsActive: self.wasOnline)
+                    } else {
+                        self.updatePresence(self.wasOnline, force: true)
+                    }
                 }
             }
         })
@@ -57,19 +64,56 @@ private final class AccountPresenceManagerImpl {
         self.shouldKeepOnlinePresenceDisposable?.dispose()
         self.currentRequestDisposable.dispose()
         self.onlineTimer?.invalidate()
+        self.ghostOfflineTimer?.invalidate()
+        self.ghostRequestDisposable.dispose()
         if let settingsObserver = self.settingsObserver {
             NotificationCenter.default.removeObserver(settingsObserver)
         }
     }
     
-    private func updatePresence(_ isOnline: Bool, force: Bool = false) {
-        if MyGramSettings.ghostHideOnline && !force {
-            // MyGram ghost mode: send no status at all, neither "online" when the app opens nor
-            // "offline" when it closes (each would refresh "last seen").
-            self.onlineTimer?.invalidate()
-            self.onlineTimer = nil
+    private func updateGhostOfflineTimer(appIsActive: Bool) {
+        if !appIsActive {
+            self.ghostOfflineTimer?.invalidate()
+            self.ghostOfflineTimer = nil
             return
         }
+        self.sendGhostOffline()
+        if self.ghostOfflineTimer == nil {
+            let timer = SignalKitTimer(timeout: 8.0, repeat: true, completion: { [weak self] in
+                guard let self = self else {
+                    return
+                }
+                if MyGramSettings.ghostHideOnline && self.wasOnline {
+                    self.sendGhostOffline()
+                } else {
+                    self.ghostOfflineTimer?.invalidate()
+                    self.ghostOfflineTimer = nil
+                }
+            }, queue: self.queue)
+            self.ghostOfflineTimer = timer
+            timer.start()
+        }
+    }
+
+    private func sendGhostOffline() {
+        self.ghostRequestDisposable.set((self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
+        |> `catch` { _ -> Signal<Api.Bool, NoError> in
+            return .single(.boolFalse)
+        }).start())
+    }
+
+    private func updatePresence(_ isOnline: Bool, force: Bool = false) {
+        if MyGramSettings.ghostHideOnline && !force {
+            // MyGram ghost mode: never send "online". While the app is open, keep telling the
+            // server "offline", which overrides an "online" the server sets on its own (after
+            // some actions) or that another session sets.
+            self.onlineTimer?.invalidate()
+            self.onlineTimer = nil
+            self.updateGhostOfflineTimer(appIsActive: isOnline)
+            return
+        }
+        self.ghostOfflineTimer?.invalidate()
+        self.ghostOfflineTimer = nil
         let request: Signal<Api.Bool, MTRpcError>
         if isOnline {
             let timer = SignalKitTimer(timeout: 30.0, repeat: false, completion: { [weak self] in
