@@ -435,6 +435,10 @@ func applyUpdateMessage(postbox: Postbox, stateManager: AccountStateManager, mes
             
             return .update(updatedMessageValue)
         })
+        if let updatedMessage = updatedMessage, case let .Id(sentId) = updatedMessage.id {
+            // MyGram: my own auto-delete rule.
+            myGramScheduleAutoDelete(accountPeerId: accountPeerId, messageId: sentId, media: updatedMessage.media)
+        }
         if let updatedMessage = updatedMessage, case let .Id(updatedId) = updatedMessage.id {
             if message.id.namespace == Namespaces.Message.Local && updatedId.namespace == Namespaces.Message.Cloud && updatedId.peerId.namespace == Namespaces.Peer.CloudChannel {
                 if let threadId = updatedMessage.threadId {
@@ -660,6 +664,8 @@ func applyUpdateGroupMessages(postbox: Postbox, stateManager: AccountStateManage
                 
                 let (tags, globalTags) = tagsForStoreMessage(incoming: currentMessage.flags.contains(.Incoming), attributes: attributes, media: media, textEntities: entitiesAttribute?.entities, isPinned: currentMessage.tags.contains(.pinned))
                 
+                // MyGram: my own auto-delete rule.
+                myGramScheduleAutoDelete(accountPeerId: stateManager.accountPeerId, messageId: updatedId, media: media)
                 return .update(StoreMessage(id: updatedId, customStableId: nil, globallyUniqueId: nil, groupingKey: currentMessage.groupingKey, threadId: currentMessage.threadId, timestamp: updatedMessage.timestamp, flags: [], tags: tags, globalTags: globalTags, localTags: currentMessage.localTags, forwardInfo: storeForwardInfo, authorId: currentMessage.author?.id, text: text, attributes: attributes, media: media))
             })
         }

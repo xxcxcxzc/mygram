@@ -289,7 +289,7 @@ public final class VoiceChangerOverlay: NSObject {
 
     private func showAdminPanel(animated: Bool = true) {
         let ghost = MyGramSettings.ghostHideOnline
-        let rows: [PanelRow] = [
+        var rows: [PanelRow] = [
             .toggle(icon: "🗑", iconColor: UIColor(red: 0.95, green: 0.45, blue: 0.4, alpha: 1.0), title: "Видалені повідомлення", subtitle: "Не зникають з чату, а позначаються «видалено»", isOn: MyGramSettings.showDeletedMessages, isEnabled: true, handler: { [weak self] value in
                 MyGramSettings.showDeletedMessages = value
                 self?.applyAppearance()
@@ -314,9 +314,189 @@ public final class VoiceChangerOverlay: NSObject {
                 MyGramSettings.ghostNoReadReceipts = value
             }),
             self.listRow(.reads),
-            .note("Статус «в мережі» Telegram зберігає один для всіх, тому його не можна сховати лише від частини людей. Для цього є винятки у вбудованих налаштуваннях приватності Telegram.")
+            .note("Статус «в мережі» Telegram зберігає один для всіх, тому його не можна сховати лише від частини людей. Для цього є винятки у вбудованих налаштуваннях приватності Telegram."),
+            .sectionGap,
+            .toggle(icon: "🧹", iconColor: UIColor(red: 0.95, green: 0.65, blue: 0.25, alpha: 1.0), title: "Автовидалення моїх повідомлень", subtitle: "Видаляє твої повідомлення через заданий час", isOn: MyGramSettings.autoDeleteEnabled, isEnabled: true, handler: { [weak self] value in
+                MyGramSettings.autoDeleteEnabled = value
+                DispatchQueue.main.async {
+                    self?.reloadAdminPanel()
+                }
+            })
         ]
+        if MyGramSettings.autoDeleteEnabled {
+            rows.append(.navigation(icon: "⏱", title: "Через скільки", value: VoiceChangerOverlay.delayTitle(MyGramSettings.autoDeleteDelay), handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showDelayPanel() }
+                }
+            }))
+            rows.append(.navigation(icon: "🗂", title: "Що видаляти", value: self.kindsSummary(), handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showKindsPanel() }
+                }
+            }))
+            rows.append(self.listRow(.autoDelete))
+            rows.append(.toggle(icon: "👥", iconColor: UIColor(white: 1.0, alpha: 0.14), title: "Видаляти в обох", subtitle: "Вимкнено: зникне лише в тебе", isOn: MyGramSettings.autoDeleteForEveryone, isEnabled: true, handler: { value in
+                MyGramSettings.autoDeleteForEveryone = value
+            }))
+        }
+        rows.append(.sectionGap)
+        rows.append(.navigation(icon: "📈", title: "Журнал активності", value: "Відкрити", handler: { [weak self] in
+            self?.openActivity()
+        }))
         self.showPanel(emoji: "🛡", title: "MyGram", subtitle: "Додаткові можливості", rows: rows, anchor: .admin, animated: animated)
+    }
+
+    private static let delayOptions: [Int] = [10, 30, 60, 300, 900, 3600, 6 * 3600, 86400, 7 * 86400]
+
+    private static func delayTitle(_ seconds: Int) -> String {
+        switch seconds {
+        case ..<60: return "\(seconds) с"
+        case ..<3600: return "\(seconds / 60) хв"
+        case ..<86400: return "\(seconds / 3600) год"
+        case ..<(7 * 86400): return "\(seconds / 86400) д"
+        default: return "\(seconds / (7 * 86400)) тиж"
+        }
+    }
+
+    private func kindsSummary() -> String {
+        let kinds = MyGramSettings.autoDeleteKinds
+        if kinds.count == MyGramMessageKind.allCases.count {
+            return "Усе"
+        }
+        if kinds.isEmpty {
+            return "Нічого"
+        }
+        return "\(kinds.count) з \(MyGramMessageKind.allCases.count)"
+    }
+
+    private func showDelayPanel() {
+        let current = MyGramSettings.autoDeleteDelay
+        var rows: [PanelRow] = [
+            .action(icon: "‹", iconColor: UIColor(white: 1.0, alpha: 0.12), title: "Назад", selected: false, handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showAdminPanel(animated: false) }
+                }
+            }),
+            .note("Повідомлення видаляється через цей час після відправки. Працює, поки MyGram запущений; що не встигло, видалиться при наступному запуску.")
+        ]
+        for seconds in VoiceChangerOverlay.delayOptions {
+            rows.append(.action(icon: "⏱", iconColor: seconds == current ? VCPalette.accent : UIColor(white: 1.0, alpha: 0.12), title: VoiceChangerOverlay.delayTitle(seconds), selected: seconds == current, handler: { [weak self] in
+                MyGramSettings.autoDeleteDelay = seconds
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showAdminPanel(animated: false) }
+                }
+            }))
+        }
+        self.showPanel(emoji: "⏱", title: "Через скільки", subtitle: "Автовидалення", rows: rows, anchor: .admin, animated: false)
+    }
+
+    private func showKindsPanel() {
+        let kinds = MyGramSettings.autoDeleteKinds
+        var rows: [PanelRow] = [
+            .action(icon: "‹", iconColor: UIColor(white: 1.0, alpha: 0.12), title: "Назад", selected: false, handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showAdminPanel(animated: false) }
+                }
+            }),
+            .note("Познач, які твої повідомлення видаляти.")
+        ]
+        for kind in MyGramMessageKind.allCases {
+            rows.append(.check(title: "\(kind.emoji)  \(kind.title)", checked: kinds.contains(kind), isEnabled: true, handler: { value in
+                var current = MyGramSettings.autoDeleteKinds
+                if value {
+                    current.insert(kind)
+                } else {
+                    current.remove(kind)
+                }
+                MyGramSettings.autoDeleteKinds = current
+            }))
+        }
+        self.showPanel(emoji: "🗂", title: "Що видаляти", subtitle: "Автовидалення", rows: rows, anchor: .admin, animated: false)
+    }
+
+    private func openActivity() {
+        guard let loadPeers = self.loadPeers else {
+            DispatchQueue.main.async {
+                self.replacePanel { $0.showActivityPanel(peers: []) }
+            }
+            return
+        }
+        loadPeers({ [weak self] peers in
+            DispatchQueue.main.async {
+                self?.replacePanel { $0.showActivityPanel(peers: peers) }
+            }
+        })
+    }
+
+    private static let activityDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd.MM HH:mm"
+        return formatter
+    }()
+
+    private static let activityTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static func describe(_ session: MyGramActivitySession) -> String {
+        let start = Date(timeIntervalSince1970: TimeInterval(session.start))
+        let startText = VoiceChangerOverlay.activityDateFormatter.string(from: start)
+        guard let end = session.end else {
+            return "🟢 \(startText) – зараз в мережі"
+        }
+        let minutes = max(0, Int(end - session.start) / 60)
+        let endText = VoiceChangerOverlay.activityTimeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(end)))
+        if end == session.start {
+            return "⚪️ \(startText) – заходив(ла) ненадовго"
+        }
+        return "⚪️ \(startText) – \(endText) (\(minutes) хв)"
+    }
+
+    private func showActivityPanel(peers: [(id: Int64, title: String)]) {
+        let mode = MyGramSettings.listMode(.activity)
+        let chosen = MyGramSettings.listPeers(.activity)
+        var rows: [PanelRow] = [
+            .action(icon: "‹", iconColor: UIColor(white: 1.0, alpha: 0.12), title: "Назад", selected: false, handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showAdminPanel(animated: false) }
+                }
+            }),
+            .navigation(icon: "👥", title: "Кого відстежувати", value: self.listSummary(.activity), handler: { [weak self] in
+                self?.openList(.activity, back: { $0.openActivity() })
+            }),
+            .note("Записує, коли вибрані люди заходять у мережу і виходять. Telegram не повідомляє, з ким людина переписується чи говорить, тому цього не видно ніде. Журнал працює лише для тих, у кого тобі видно «був(ла)», і лише поки MyGram отримує оновлення.")
+        ]
+        var tracked: [(id: Int64, title: String)] = []
+        for peer in peers {
+            let follows: Bool
+            switch mode {
+            case .everyone: follows = true
+            case .everyoneExcept: follows = !chosen.contains(peer.id)
+            case .onlyThese: follows = chosen.contains(peer.id)
+            }
+            if follows && (mode == .onlyThese || !MyGramActivityLog.sessions(peerId: peer.id).isEmpty) {
+                tracked.append(peer)
+            }
+        }
+        if tracked.isEmpty {
+            rows.append(.note("Поки нікого. Натисни «Кого відстежувати» і вибери людей."))
+        }
+        for peer in tracked.prefix(40) {
+            rows.append(.sectionGap)
+            let sessions = MyGramActivityLog.sessions(peerId: peer.id)
+            var text = "👤 \(peer.title)"
+            if sessions.isEmpty {
+                text += "\nЩе немає записів"
+            } else {
+                for session in sessions.prefix(12) {
+                    text += "\n" + VoiceChangerOverlay.describe(session)
+                }
+            }
+            rows.append(.note(text))
+        }
+        self.showPanel(emoji: "📈", title: "Журнал активності", subtitle: "Коли люди були в мережі", rows: rows, anchor: .admin, animated: false)
     }
 
     private func featureTitle(_ feature: MyGramFeature) -> String {
@@ -324,6 +504,8 @@ public final class VoiceChangerOverlay: NSObject {
         case .deleted: return "Видалені повідомлення"
         case .typing: return "Ховати «друкує…»"
         case .reads: return "Прочитано лише після відповіді"
+        case .autoDelete: return "Автовидалення"
+        case .activity: return "Журнал активності"
         }
     }
 
@@ -342,14 +524,15 @@ public final class VoiceChangerOverlay: NSObject {
         })
     }
 
-    private func openList(_ feature: MyGramFeature) {
+    private func openList(_ feature: MyGramFeature, back: ((VoiceChangerOverlay) -> Void)? = nil) {
+        let back = back ?? { $0.showAdminPanel(animated: false) }
         guard let loadPeers = self.loadPeers else {
-            self.replacePanel { $0.showListPanel(feature, peers: []) }
+            self.replacePanel { $0.showListPanel(feature, peers: [], back: back) }
             return
         }
         loadPeers({ [weak self] peers in
             DispatchQueue.main.async {
-                self?.replacePanel { $0.showListPanel(feature, peers: peers) }
+                self?.replacePanel { $0.showListPanel(feature, peers: peers, back: back) }
             }
         })
     }
@@ -364,19 +547,19 @@ public final class VoiceChangerOverlay: NSObject {
         show(self)
     }
 
-    private func showListPanel(_ feature: MyGramFeature, peers: [(id: Int64, title: String)]) {
+    private func showListPanel(_ feature: MyGramFeature, peers: [(id: Int64, title: String)], back: @escaping (VoiceChangerOverlay) -> Void) {
         let mode = MyGramSettings.listMode(feature)
         let selected = MyGramSettings.listPeers(feature)
         var rows: [PanelRow] = [
             .action(icon: "‹", iconColor: UIColor(white: 1.0, alpha: 0.12), title: "Назад", selected: false, handler: { [weak self] in
                 DispatchQueue.main.async {
-                    self?.replacePanel { $0.showAdminPanel(animated: false) }
+                    self?.replacePanel(back)
                 }
             }),
             .segments(items: ["Усі", "Усі, крім", "Лише"], selected: mode.rawValue, handler: { [weak self] index in
                 MyGramSettings.setListMode(feature, MyGramListMode(rawValue: index) ?? .everyone)
                 DispatchQueue.main.async {
-                    self?.replacePanel { $0.showListPanel(feature, peers: peers) }
+                    self?.replacePanel { $0.showListPanel(feature, peers: peers, back: back) }
                 }
             })
         ]

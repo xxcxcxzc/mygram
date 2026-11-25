@@ -62,6 +62,8 @@ extension ReplayContext {
                 }
             } else {
                 presences[peerId] = status
+                // MyGram activity log.
+                myGramRecordPresence(peerId: peerId, status: status.status)
             }
         }
         updatePeerPresencesClean(transaction: transaction, accountPeerId: accountPeerId, peerPresences: presences)

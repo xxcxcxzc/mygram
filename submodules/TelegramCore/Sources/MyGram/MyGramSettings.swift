@@ -71,6 +71,8 @@ public enum MyGramFeature: String, CaseIterable {
     case deleted
     case typing
     case reads
+    case autoDelete
+    case activity
 }
 
 /// Who a feature works for.
@@ -82,7 +84,12 @@ public enum MyGramListMode: Int {
 
 public extension MyGramSettings {
     static func listMode(_ feature: MyGramFeature) -> MyGramListMode {
-        return MyGramListMode(rawValue: UserDefaults.standard.integer(forKey: "mygram.list.\(feature.rawValue).mode")) ?? .everyone
+        let key = "mygram.list.\(feature.rawValue).mode"
+        if UserDefaults.standard.object(forKey: key) == nil, feature == .activity {
+            // The activity log follows nobody until people are chosen.
+            return .onlyThese
+        }
+        return MyGramListMode(rawValue: UserDefaults.standard.integer(forKey: key)) ?? .everyone
     }
 
     static func setListMode(_ feature: MyGramFeature, _ mode: MyGramListMode) {

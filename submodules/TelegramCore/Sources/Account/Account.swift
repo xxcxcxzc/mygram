@@ -1611,6 +1611,8 @@ public class Account {
         #endif
         if !supplementary {
             self.managedOperationsDisposable.add(managedNetworkTelemetryReports(postbox: postbox, network: network).start())
+            // MyGram: auto-delete of my own messages.
+            self.managedOperationsDisposable.add(myGramManagedAutoDelete(account: self).start())
         }
 
         if !supplementary {
