@@ -1815,16 +1815,45 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
 
         // Floating voice changer button (calls, voice messages, round videos).
         VoiceChangerOverlay.shared.install(windowScene: scene)
-        // MyGram lists ("for whom"): the chats of the current account, most recent first.
+        // MyGram lists ("for whom"): the chats of every logged-in account, most recent first,
+        // each person once (a user's id is the same in every account).
         VoiceChangerOverlay.shared.loadPeers = { [weak self] completion in
-            guard let context = self?.contextValue?.context else {
+            guard let sharedContext = self?.contextValue?.context.sharedContext else {
                 completion([])
                 return
             }
-            let _ = (context.engine.messages.chatListPeers(group: .root, filterPredicate: nil, count: 400)
+            let _ = (sharedContext.activeAccountContexts
             |> take(1)
-            |> deliverOnMainQueue).start(next: { peers, _ in
-                completion(peers.map { (id: $0.id.toInt64(), title: $0.debugDisplayTitle) })
+            |> mapToSignal { accounts -> Signal<[[(id: Int64, title: String)]], NoError> in
+                var contexts: [AccountContext] = []
+                if let primary = accounts.primary {
+                    contexts.append(primary)
+                }
+                for (_, context, _) in accounts.accounts where context.account.id != accounts.primary?.account.id {
+                    contexts.append(context)
+                }
+                if contexts.isEmpty {
+                    return .single([])
+                }
+                let signals: [Signal<[(id: Int64, title: String)], NoError>] = contexts.map { context in
+                    return context.engine.messages.chatListPeers(group: .root, filterPredicate: nil, count: 400)
+                    |> take(1)
+                    |> map { peers, _ -> [(id: Int64, title: String)] in
+                        return peers.map { (id: $0.id.toInt64(), title: $0.debugDisplayTitle) }
+                    }
+                }
+                return combineLatest(signals)
+            }
+            |> deliverOnMainQueue).start(next: { lists in
+                var seen = Set<Int64>()
+                var result: [(id: Int64, title: String)] = []
+                for list in lists {
+                    for peer in list where !seen.contains(peer.id) && !peer.title.isEmpty {
+                        seen.insert(peer.id)
+                        result.append(peer)
+                    }
+                }
+                completion(result)
             })
         }
 
