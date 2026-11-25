@@ -155,6 +155,7 @@ jobs:
             --overrideXcodeVersion \
             --cacheDir="$HOME/telegram-bazel-cache" \
             build \
+            --continueOnError \
             --configurationPath="$RUNNER_TEMP/configuration.json" \
             --codesigningInformationPath="$SIGN_DIR" \
             --configuration=release_arm64 \

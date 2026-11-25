@@ -219,9 +219,9 @@ func myGramScheduleAutoDelete(accountPeerId: PeerId, messageId: MessageId, media
 
 /// Runs while the account is alive in the main app: deletes queued messages when they are due.
 func myGramManagedAutoDelete(account: Account) -> Signal<Void, NoError> {
-    return Signal { _ in
+    let accountPeerId = account.peerId.toInt64()
+    return Signal { [weak account] _ in
         let queue = Queue()
-        let accountPeerId = account.peerId.toInt64()
         let deletions = DisposableSet()
         let timer = SwiftSignalKit.Timer(timeout: 5.0, repeat: true, completion: { [weak account] in
             guard let account = account else {
