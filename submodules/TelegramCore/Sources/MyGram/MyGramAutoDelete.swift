@@ -86,38 +86,38 @@ public extension MyGramSettings {
     }
 
     static var autoDeleteEnabled: Bool {
-        get { return UserDefaults.standard.bool(forKey: autoDeleteEnabledKey) }
-        set { UserDefaults.standard.set(newValue, forKey: autoDeleteEnabledKey); notifyChanged() }
+        get { return MyGramSettings.store.bool(forKey: autoDeleteEnabledKey) }
+        set { MyGramSettings.store.set(newValue, forKey: autoDeleteEnabledKey); notifyChanged() }
     }
 
     /// Seconds after sending.
     static var autoDeleteDelay: Int {
         get {
-            let value = UserDefaults.standard.integer(forKey: autoDeleteDelayKey)
+            let value = MyGramSettings.store.integer(forKey: autoDeleteDelayKey)
             return value > 0 ? value : 60
         }
-        set { UserDefaults.standard.set(newValue, forKey: autoDeleteDelayKey); notifyChanged() }
+        set { MyGramSettings.store.set(newValue, forKey: autoDeleteDelayKey); notifyChanged() }
     }
 
     static var autoDeleteKinds: Set<MyGramMessageKind> {
         get {
-            guard let values = UserDefaults.standard.array(forKey: autoDeleteKindsKey) as? [String] else {
+            guard let values = MyGramSettings.store.array(forKey: autoDeleteKindsKey) as? [String] else {
                 return Set(MyGramMessageKind.allCases)
             }
             return Set(values.compactMap(MyGramMessageKind.init(rawValue:)))
         }
-        set { UserDefaults.standard.set(newValue.map { $0.rawValue }, forKey: autoDeleteKindsKey); notifyChanged() }
+        set { MyGramSettings.store.set(newValue.map { $0.rawValue }, forKey: autoDeleteKindsKey); notifyChanged() }
     }
 
     /// Delete for both sides (true) or only for me (false).
     static var autoDeleteForEveryone: Bool {
         get {
-            if UserDefaults.standard.object(forKey: autoDeleteForEveryoneKey) == nil {
+            if MyGramSettings.store.object(forKey: autoDeleteForEveryoneKey) == nil {
                 return true
             }
-            return UserDefaults.standard.bool(forKey: autoDeleteForEveryoneKey)
+            return MyGramSettings.store.bool(forKey: autoDeleteForEveryoneKey)
         }
-        set { UserDefaults.standard.set(newValue, forKey: autoDeleteForEveryoneKey); notifyChanged() }
+        set { MyGramSettings.store.set(newValue, forKey: autoDeleteForEveryoneKey); notifyChanged() }
     }
 }
 
@@ -138,7 +138,7 @@ private final class MyGramAutoDeleteQueue {
     }
 
     private func load() -> [Entry] {
-        guard let raw = UserDefaults.standard.array(forKey: MyGramAutoDeleteQueue.key) as? [[String: NSNumber]] else {
+        guard let raw = MyGramSettings.store.array(forKey: MyGramAutoDeleteQueue.key) as? [[String: NSNumber]] else {
             return []
         }
         return raw.compactMap { item in
@@ -160,7 +160,7 @@ private final class MyGramAutoDeleteQueue {
                 "e": NSNumber(value: entry.forEveryone)
             ]
         }
-        UserDefaults.standard.set(raw, forKey: MyGramAutoDeleteQueue.key)
+        MyGramSettings.store.set(raw, forKey: MyGramAutoDeleteQueue.key)
     }
 
     func add(_ entry: Entry) {

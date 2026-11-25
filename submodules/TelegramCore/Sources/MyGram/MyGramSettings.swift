@@ -8,6 +8,26 @@ import MtProtoKit
 public final class MyGramSettings {
     public static let didChangeNotification = Notification.Name("MyGramSettingsDidChange")
 
+    /// Shared with the app extensions (the notification service applies deletions too), so the
+    /// settings live in the app group. Values saved by older builds in the app's own defaults are
+    /// copied over once.
+    public static let store: UserDefaults = {
+        var bundleId = Bundle.main.bundleIdentifier ?? ""
+        for suffix in [".Share", ".NotificationContent", ".NotificationService", ".Widget", ".SiriIntents", ".BroadcastUpload"] where bundleId.hasSuffix(suffix) {
+            bundleId = String(bundleId.dropLast(suffix.count))
+        }
+        guard !bundleId.isEmpty, let shared = UserDefaults(suiteName: "group." + bundleId) else {
+            return UserDefaults.standard
+        }
+        if !shared.bool(forKey: "mygram.migratedToGroup") {
+            for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix("mygram.") {
+                shared.set(value, forKey: key)
+            }
+            shared.set(true, forKey: "mygram.migratedToGroup")
+        }
+        return shared
+    }()
+
     private static let showDeletedKey = "mygram.showDeletedMessages"
     private static let ghostHideOnlineKey = "mygram.ghost.hideOnline"
     private static let ghostOfflineAfterSendKey = "mygram.ghost.offlineAfterSend"
@@ -15,7 +35,7 @@ public final class MyGramSettings {
     private static let ghostNoReadReceiptsKey = "mygram.ghost.noReadReceipts"
 
     private static let registerDefaults: Void = {
-        UserDefaults.standard.register(defaults: [
+        MyGramSettings.store.register(defaults: [
             MyGramSettings.showDeletedKey: true,
             MyGramSettings.ghostHideOnlineKey: true,
             MyGramSettings.ghostOfflineAfterSendKey: true,
@@ -26,12 +46,12 @@ public final class MyGramSettings {
 
     private static func readFlag(_ key: String) -> Bool {
         let _ = MyGramSettings.registerDefaults
-        return UserDefaults.standard.bool(forKey: key)
+        return MyGramSettings.store.bool(forKey: key)
     }
 
     private static func writeFlag(_ key: String, _ value: Bool) {
         let _ = MyGramSettings.registerDefaults
-        UserDefaults.standard.set(value, forKey: key)
+        MyGramSettings.store.set(value, forKey: key)
         NotificationCenter.default.post(name: MyGramSettings.didChangeNotification, object: nil)
     }
 
@@ -85,26 +105,26 @@ public enum MyGramListMode: Int {
 public extension MyGramSettings {
     static func listMode(_ feature: MyGramFeature) -> MyGramListMode {
         let key = "mygram.list.\(feature.rawValue).mode"
-        if UserDefaults.standard.object(forKey: key) == nil, feature == .activity {
+        if MyGramSettings.store.object(forKey: key) == nil, feature == .activity {
             // The activity log follows nobody until people are chosen.
             return .onlyThese
         }
-        return MyGramListMode(rawValue: UserDefaults.standard.integer(forKey: key)) ?? .everyone
+        return MyGramListMode(rawValue: MyGramSettings.store.integer(forKey: key)) ?? .everyone
     }
 
     static func setListMode(_ feature: MyGramFeature, _ mode: MyGramListMode) {
-        UserDefaults.standard.set(mode.rawValue, forKey: "mygram.list.\(feature.rawValue).mode")
+        MyGramSettings.store.set(mode.rawValue, forKey: "mygram.list.\(feature.rawValue).mode")
         NotificationCenter.default.post(name: MyGramSettings.didChangeNotification, object: nil)
     }
 
     /// Chats in the list, as `PeerId.toInt64()` values.
     static func listPeers(_ feature: MyGramFeature) -> Set<Int64> {
-        let values = UserDefaults.standard.array(forKey: "mygram.list.\(feature.rawValue).peers") as? [NSNumber] ?? []
+        let values = MyGramSettings.store.array(forKey: "mygram.list.\(feature.rawValue).peers") as? [NSNumber] ?? []
         return Set(values.map { $0.int64Value })
     }
 
     static func setListPeers(_ feature: MyGramFeature, _ peers: Set<Int64>) {
-        UserDefaults.standard.set(peers.map { NSNumber(value: $0) }, forKey: "mygram.list.\(feature.rawValue).peers")
+        MyGramSettings.store.set(peers.map { NSNumber(value: $0) }, forKey: "mygram.list.\(feature.rawValue).peers")
         NotificationCenter.default.post(name: MyGramSettings.didChangeNotification, object: nil)
     }
 
@@ -226,4 +246,14 @@ func myGramMarkReadAfterReply(network: Network, stateManager: AccountStateManage
             }
         })
     }
+}
+
+/// Deletion that reached the notification service as a push: keeps the messages the rules keep
+/// (marked deleted) and returns the ones to delete for real.
+public func myGramFilterRemoteDeletion(transaction: Transaction, ids: [MessageId]) -> [MessageId] {
+    guard MyGramSettings.showDeletedMessages else {
+        return ids
+    }
+    let kept = myGramMarkMessagesDeleted(transaction: transaction, ids: ids)
+    return ids.filter { !kept.contains($0) }
 }

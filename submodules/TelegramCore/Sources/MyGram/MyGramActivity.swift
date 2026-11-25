@@ -21,7 +21,7 @@ public enum MyGramActivityLog {
     }
 
     private static func load(_ peerId: Int64) -> [MyGramActivitySession] {
-        guard let raw = UserDefaults.standard.array(forKey: key(peerId)) as? [[NSNumber]] else {
+        guard let raw = MyGramSettings.store.array(forKey: key(peerId)) as? [[NSNumber]] else {
             return []
         }
         return raw.compactMap { item in
@@ -41,7 +41,7 @@ public enum MyGramActivityLog {
             }
             return [NSNumber(value: session.start)]
         }
-        UserDefaults.standard.set(raw, forKey: key(peerId))
+        MyGramSettings.store.set(raw, forKey: key(peerId))
     }
 
     /// Newest first.
@@ -53,7 +53,7 @@ public enum MyGramActivityLog {
 
     public static func clear(peerId: Int64) {
         lock.lock()
-        UserDefaults.standard.removeObject(forKey: key(peerId))
+        MyGramSettings.store.removeObject(forKey: key(peerId))
         lock.unlock()
     }
 
