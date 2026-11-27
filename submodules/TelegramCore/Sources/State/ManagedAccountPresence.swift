@@ -73,6 +73,11 @@ private final class AccountPresenceManagerImpl {
     
     private func updateGhostOfflineTimer(appIsActive: Bool) {
         if !appIsActive {
+            // Leaving the app or switching to another account: one last "offline" while the
+            // connection is still up, so an "online" the server set after a send doesn't linger.
+            if self.ghostOfflineTimer != nil {
+                self.sendGhostOffline()
+            }
             self.ghostOfflineTimer?.invalidate()
             self.ghostOfflineTimer = nil
             return
@@ -96,10 +101,11 @@ private final class AccountPresenceManagerImpl {
     }
 
     private func sendGhostOffline() {
-        self.ghostRequestDisposable.set((self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
+        // Not tied to a disposable: a new send must not cancel the previous one still in flight.
+        let _ = (self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
         |> `catch` { _ -> Signal<Api.Bool, NoError> in
             return .single(.boolFalse)
-        }).start())
+        }).start()
     }
 
     private func updatePresence(_ isOnline: Bool, force: Bool = false) {

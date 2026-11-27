@@ -201,7 +201,7 @@ func myGramReportOfflineAfterSend(network: Network) {
     guard MyGramSettings.ghostHideOnline, MyGramSettings.ghostOfflineAfterSend else {
         return
     }
-    for seconds in [0.3, 3.0] {
+    for seconds in [0.3, 1.5, 4.0, 10.0, 25.0] {
         Queue.concurrentDefaultQueue().after(seconds, {
             let _ = (network.request(Api.functions.account.updateStatus(offline: .boolTrue))
             |> `catch` { _ -> Signal<Api.Bool, NoError> in

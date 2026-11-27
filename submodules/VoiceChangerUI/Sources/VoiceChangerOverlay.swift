@@ -126,6 +126,9 @@ public final class VoiceChangerOverlay: NSObject {
     private var isCompact: Bool = UserDefaults.standard.bool(forKey: VoiceChangerOverlay.compactKey)
     private var panStartCenter: CGPoint = CGPoint()
 
+    private weak var previousKeyWindow: UIWindow?
+    private var signatureTextDelegate: SignatureTextDelegate?
+
     /// Set by the app: loads the user's chats (id as `PeerId.toInt64()`, title) for the lists.
     public var loadPeers: ((@escaping ([(id: Int64, title: String)]) -> Void) -> Void)?
 
@@ -340,6 +343,11 @@ public final class VoiceChangerOverlay: NSObject {
             }))
         }
         rows.append(.sectionGap)
+        rows.append(.navigation(icon: "✍️", title: "Підписи в каналах", value: "\(MyGramSettings.signatures.filter { $0.isEnabled }.count) увімк.", handler: { [weak self] in
+            DispatchQueue.main.async {
+                self?.replacePanel { $0.showSignaturesPanel() }
+            }
+        }))
         rows.append(.navigation(icon: "📈", title: "Журнал активності", value: "Відкрити", handler: { [weak self] in
             self?.openActivity()
         }))
@@ -497,6 +505,308 @@ public final class VoiceChangerOverlay: NSObject {
             rows.append(.note(text))
         }
         self.showPanel(emoji: "📈", title: "Журнал активності", subtitle: "Коли люди були в мережі", rows: rows, anchor: .admin, animated: false)
+    }
+
+    // MARK: - Signatures
+
+    private func signaturePreviewTitle(_ signature: MyGramSignature) -> String {
+        let plain = myGramParseSignatureMarkup(signature.text).text
+        let firstLine = plain.split(separator: "\n").first.map(String.init) ?? ""
+        if firstLine.isEmpty {
+            return "Порожній підпис"
+        }
+        return firstLine.count > 34 ? String(firstLine.prefix(34)) + "…" : firstLine
+    }
+
+    private func showSignaturesPanel() {
+        var rows: [PanelRow] = [
+            .action(icon: "‹", iconColor: UIColor(white: 1.0, alpha: 0.12), title: "Назад", selected: false, handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showAdminPanel(animated: false) }
+                }
+            }),
+            .note("Підпис додається під твоїм повідомленням через порожній рядок одразу при відправці (не редагуванням). Для кожного підпису обираєш канали чи чати.")
+        ]
+        for signature in MyGramSettings.signatures {
+            let signatureId = signature.id
+            rows.append(.sectionGap)
+            rows.append(.toggle(icon: "✍️", iconColor: UIColor(red: 0.3, green: 0.6, blue: 1.0, alpha: 1.0), title: self.signaturePreviewTitle(signature), subtitle: "Чатів: \(signature.peers.count)", isOn: signature.isEnabled, isEnabled: true, handler: { value in
+                if var current = MyGramSettings.signatures.first(where: { $0.id == signatureId }) {
+                    current.isEnabled = value
+                    MyGramSettings.updateSignature(current)
+                }
+            }))
+            rows.append(.navigation(icon: "✏️", title: "Змінити", value: "", handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showSignatureEditor(signatureId: signatureId) }
+                }
+            }))
+        }
+        rows.append(.sectionGap)
+        rows.append(.action(icon: "➕", iconColor: VCPalette.green, title: "Додати підпис", selected: false, handler: { [weak self] in
+            let signature = MyGramSignature(id: UUID().uuidString, text: "", isEnabled: true, peers: [])
+            MyGramSettings.updateSignature(signature)
+            DispatchQueue.main.async {
+                self?.replacePanel { $0.showSignatureEditor(signatureId: signature.id) }
+            }
+        }))
+        self.showPanel(emoji: "✍️", title: "Підписи в каналах", subtitle: "Текст під твоїми повідомленнями", rows: rows, anchor: .admin, animated: false)
+    }
+
+    private func openSignatureChats(signatureId: String) {
+        guard let loadPeers = self.loadPeers else {
+            DispatchQueue.main.async {
+                self.replacePanel { $0.showSignatureChatsPanel(signatureId: signatureId, peers: []) }
+            }
+            return
+        }
+        loadPeers({ [weak self] peers in
+            DispatchQueue.main.async {
+                self?.replacePanel { $0.showSignatureChatsPanel(signatureId: signatureId, peers: peers) }
+            }
+        })
+    }
+
+    private func showSignatureChatsPanel(signatureId: String, peers: [(id: Int64, title: String)]) {
+        let selected = Set(MyGramSettings.signatures.first(where: { $0.id == signatureId })?.peers ?? [])
+        var rows: [PanelRow] = [
+            .action(icon: "‹", iconColor: UIColor(white: 1.0, alpha: 0.12), title: "Назад", selected: false, handler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showSignatureEditor(signatureId: signatureId) }
+                }
+            }),
+            .note("Познач канали й чати, де додавати цей підпис.")
+        ]
+        if peers.isEmpty {
+            rows.append(.note("Чати ще не завантажились. Відкрий список ще раз за хвилинку."))
+        }
+        let ordered = peers.filter { selected.contains($0.id) } + peers.filter { !selected.contains($0.id) }
+        for peer in ordered {
+            let peerId = peer.id
+            rows.append(.check(title: peer.title, checked: selected.contains(peerId), isEnabled: true, handler: { value in
+                guard var current = MyGramSettings.signatures.first(where: { $0.id == signatureId }) else {
+                    return
+                }
+                var peersSet = Set(current.peers)
+                if value {
+                    peersSet.insert(peerId)
+                } else {
+                    peersSet.remove(peerId)
+                }
+                current.peers = Array(peersSet)
+                MyGramSettings.updateSignature(current)
+            }))
+        }
+        self.showPanel(emoji: "📢", title: "Де додавати", subtitle: "Канали й чати для підпису", rows: rows, anchor: .admin, animated: false)
+    }
+
+    private static func renderSignaturePreview(_ markup: String) -> NSAttributedString {
+        let parsed = myGramParseSignatureMarkup(markup)
+        let baseFont = UIFont.systemFont(ofSize: 15.0)
+        let result = NSMutableAttributedString(string: parsed.text, attributes: [.font: baseFont, .foregroundColor: UIColor.white])
+        let length = (parsed.text as NSString).length
+        for entity in parsed.entities {
+            let lower = max(0, min(entity.range.lowerBound, length))
+            let upper = max(lower, min(entity.range.upperBound, length))
+            let range = NSRange(location: lower, length: upper - lower)
+            if range.length == 0 {
+                continue
+            }
+            switch entity.type {
+            case .Bold:
+                result.addAttribute(.font, value: UIFont.boldSystemFont(ofSize: 15.0), range: range)
+            case .Italic:
+                result.addAttribute(.font, value: UIFont.italicSystemFont(ofSize: 15.0), range: range)
+            case .Underline:
+                result.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range)
+            case .Strikethrough:
+                result.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: range)
+            case .Code:
+                result.addAttribute(.font, value: UIFont.monospacedSystemFont(ofSize: 14.0, weight: .regular), range: range)
+            case .Spoiler:
+                result.addAttribute(.backgroundColor, value: UIColor(white: 1.0, alpha: 0.25), range: range)
+            case .TextUrl:
+                result.addAttribute(.foregroundColor, value: UIColor(red: 0.4, green: 0.7, blue: 1.0, alpha: 1.0), range: range)
+                result.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range)
+            default:
+                break
+            }
+        }
+        return result
+    }
+
+    private func showSignatureEditor(signatureId: String) {
+        guard let window = self.window, let signature = MyGramSettings.signatures.first(where: { $0.id == signatureId }) else {
+            return
+        }
+        self.panelTargets.removeAll()
+
+        let container = UIView(frame: window.bounds)
+        container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.backgroundColor = .clear
+        let dim = UIView(frame: container.bounds)
+        dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        dim.backgroundColor = UIColor(white: 0.0, alpha: 0.4)
+        container.addSubview(dim)
+
+        let insets = window.safeAreaInsets
+        let cardWidth = min(360.0, window.bounds.width - 24.0)
+        let card = UIView(frame: CGRect(x: floor((window.bounds.width - cardWidth) / 2.0), y: insets.top + 10.0, width: cardWidth, height: 384.0))
+        card.backgroundColor = UIColor(white: 0.12, alpha: 0.98)
+        card.layer.cornerRadius = 22.0
+        card.layer.cornerCurve = .continuous
+        card.layer.borderWidth = 1.0
+        card.layer.borderColor = UIColor(white: 1.0, alpha: 0.1).cgColor
+        container.addSubview(card)
+
+        let title = UILabel(frame: CGRect(x: 16.0, y: 12.0, width: cardWidth - 32.0, height: 22.0))
+        title.text = "✍️ Підпис"
+        title.textColor = VCPalette.primaryText
+        title.font = UIFont.systemFont(ofSize: 17.0, weight: .semibold)
+        card.addSubview(title)
+
+        let textView = UITextView(frame: CGRect(x: 12.0, y: 42.0, width: cardWidth - 24.0, height: 96.0))
+        textView.backgroundColor = UIColor(white: 1.0, alpha: 0.07)
+        textView.textColor = .white
+        textView.tintColor = VCPalette.green
+        textView.font = UIFont.systemFont(ofSize: 15.0)
+        textView.layer.cornerRadius = 12.0
+        textView.keyboardAppearance = .dark
+        textView.autocorrectionType = .no
+        textView.text = signature.text
+        card.addSubview(textView)
+
+        // Formatting buttons wrap the selection in markup.
+        let tools: [(title: String, open: String, close: String)] = [
+            ("B", "**", "**"),
+            ("I", "__", "__"),
+            ("U", "++", "++"),
+            ("S", "~~", "~~"),
+            ("</>", "`", "`"),
+            ("▒", "||", "||"),
+            ("🔗", "[", "](https://)")
+        ]
+        let toolWidth = floor((cardWidth - 24.0 - CGFloat(tools.count - 1) * 6.0) / CGFloat(tools.count))
+        for (index, tool) in tools.enumerated() {
+            let button = UIButton(type: .system)
+            button.frame = CGRect(x: 12.0 + CGFloat(index) * (toolWidth + 6.0), y: 146.0, width: toolWidth, height: 34.0)
+            button.setTitle(tool.title, for: .normal)
+            button.setTitleColor(.white, for: .normal)
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 15.0, weight: .semibold)
+            button.backgroundColor = UIColor(white: 1.0, alpha: 0.1)
+            button.layer.cornerRadius = 9.0
+            let target = RowActionTarget(action: { [weak textView] in
+                guard let textView = textView else {
+                    return
+                }
+                let current = textView.text ?? ""
+                let range = textView.selectedRange
+                let nsText = current as NSString
+                let safeRange = NSRange(location: min(range.location, nsText.length), length: min(range.length, max(0, nsText.length - min(range.location, nsText.length))))
+                let selected = nsText.substring(with: safeRange)
+                let replacement = tool.open + (selected.isEmpty ? "текст" : selected) + tool.close
+                textView.text = nsText.replacingCharacters(in: safeRange, with: replacement)
+                textView.selectedRange = NSRange(location: safeRange.location + (replacement as NSString).length, length: 0)
+                textView.delegate?.textViewDidChange?(textView)
+            })
+            self.panelTargets.append(target)
+            button.addTarget(target, action: #selector(RowActionTarget.performAction), for: .touchUpInside)
+            card.addSubview(button)
+        }
+
+        let previewTitle = UILabel(frame: CGRect(x: 16.0, y: 188.0, width: cardWidth - 32.0, height: 16.0))
+        previewTitle.text = "Як виглядатиме:"
+        previewTitle.textColor = VCPalette.secondaryText
+        previewTitle.font = UIFont.systemFont(ofSize: 12.0)
+        card.addSubview(previewTitle)
+
+        let preview = UILabel(frame: CGRect(x: 16.0, y: 206.0, width: cardWidth - 32.0, height: 70.0))
+        preview.numberOfLines = 4
+        preview.attributedText = VoiceChangerOverlay.renderSignaturePreview(signature.text)
+        card.addSubview(preview)
+
+        let delegate = SignatureTextDelegate(onChange: { [weak preview] text in
+            preview?.attributedText = VoiceChangerOverlay.renderSignaturePreview(text)
+        })
+        self.signatureTextDelegate = delegate
+        textView.delegate = delegate
+
+        let save: () -> Void = { [weak textView] in
+            guard let textView = textView, var current = MyGramSettings.signatures.first(where: { $0.id == signatureId }) else {
+                return
+            }
+            current.text = textView.text ?? ""
+            MyGramSettings.updateSignature(current)
+        }
+
+        let buttons: [(title: String, color: UIColor, action: () -> Void)] = [
+            ("📢 Де додавати (\(signature.peers.count))", UIColor(white: 1.0, alpha: 0.12), { [weak self] in
+                save()
+                self?.endSignatureEditing()
+                self?.openSignatureChats(signatureId: signatureId)
+            }),
+            ("🗑 Видалити", UIColor(red: 0.85, green: 0.3, blue: 0.3, alpha: 0.9), { [weak self] in
+                MyGramSettings.removeSignature(id: signatureId)
+                self?.endSignatureEditing()
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showSignaturesPanel() }
+                }
+            }),
+            ("Готово", VCPalette.green, { [weak self] in
+                save()
+                self?.endSignatureEditing()
+                DispatchQueue.main.async {
+                    self?.replacePanel { $0.showSignaturesPanel() }
+                }
+            })
+        ]
+        var buttonX: CGFloat = 12.0
+        let widths: [CGFloat] = [cardWidth * 0.42, cardWidth * 0.27, 0.0]
+        for (index, item) in buttons.enumerated() {
+            let width = index == buttons.count - 1 ? (cardWidth - 12.0 - buttonX) : widths[index]
+            let button = UIButton(type: .system)
+            button.frame = CGRect(x: buttonX, y: 288.0, width: width - 6.0, height: 40.0)
+            button.setTitle(item.title, for: .normal)
+            button.setTitleColor(.white, for: .normal)
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 14.0, weight: .semibold)
+            button.titleLabel?.adjustsFontSizeToFitWidth = true
+            button.backgroundColor = item.color
+            button.layer.cornerRadius = 11.0
+            let target = RowActionTarget(action: item.action)
+            self.panelTargets.append(target)
+            button.addTarget(target, action: #selector(RowActionTarget.performAction), for: .touchUpInside)
+            card.addSubview(button)
+            buttonX += width
+        }
+
+        let hint = UILabel(frame: CGRect(x: 16.0, y: 334.0, width: cardWidth - 32.0, height: 42.0))
+        hint.numberOfLines = 3
+        hint.text = "**жирний**  __курсив__  ++підкреслений++  ~~закреслений~~  `код`  ||спойлер||  [текст](https://адреса)"
+        hint.textColor = VCPalette.secondaryText
+        hint.font = UIFont.systemFont(ofSize: 11.0)
+        card.addSubview(hint)
+
+        if let lowest = window.buttons.first {
+            window.insertSubview(container, belowSubview: lowest)
+        } else {
+            window.addSubview(container)
+        }
+        window.panelContainer = container
+        self.panelContainer = container
+
+        // The overlay window has to be key for the keyboard; the app's window gets it back after.
+        self.previousKeyWindow = window.windowScene?.windows.first(where: { $0.isKeyWindow && $0 !== window })
+        window.makeKey()
+        textView.becomeFirstResponder()
+    }
+
+    private func endSignatureEditing() {
+        self.window?.endEditing(true)
+        if let previousKeyWindow = self.previousKeyWindow {
+            previousKeyWindow.makeKey()
+        }
+        self.previousKeyWindow = nil
+        self.signatureTextDelegate = nil
     }
 
     private func featureTitle(_ feature: MyGramFeature) -> String {
@@ -947,6 +1257,7 @@ public final class VoiceChangerOverlay: NSObject {
     }
 
     private func hidePanel() {
+        self.endSignatureEditing()
         guard let container = self.panelContainer else {
             return
         }
@@ -963,6 +1274,7 @@ public final class VoiceChangerOverlay: NSObject {
     }
 
     @objc private func backgroundTapped() {
+        self.endSignatureEditing()
         self.hidePanel()
     }
 
@@ -1081,5 +1393,17 @@ private extension UIButton {
 private extension CGRect {
     var center: CGPoint {
         return CGPoint(x: self.midX, y: self.midY)
+    }
+}
+
+private final class SignatureTextDelegate: NSObject, UITextViewDelegate {
+    let onChange: (String) -> Void
+
+    init(onChange: @escaping (String) -> Void) {
+        self.onChange = onChange
+    }
+
+    func textViewDidChange(_ textView: UITextView) {
+        self.onChange(textView.text ?? "")
     }
 }
